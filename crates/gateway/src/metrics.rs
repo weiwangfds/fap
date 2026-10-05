@@ -9,6 +9,8 @@ pub struct TunnelMetrics {
     bytes_rx: std::sync::atomic::AtomicU64,
     active_streams: std::sync::atomic::AtomicU64,
     total_streams: std::sync::atomic::AtomicU64,
+    /// 最近错误一次性写入：`Ordering::Release` 后 `Acquire` 读出 String；
+    /// 内部用 `Mutex<String>` 是 Send 的——只要锁内不跨 await 即可。
     last_error: std::sync::Mutex<Option<String>>,
 }
 

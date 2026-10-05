@@ -3,9 +3,10 @@ pub mod admin;
 pub mod metrics;
 pub mod registry;
 pub mod router;
-pub mod streams;
-pub mod store;
-pub mod server;
 pub mod shared_port;
+pub mod store;
+pub mod streams;
+pub mod throttle;
+pub mod server;
 
 pub use server::{Gateway, GatewayConfig};

@@ -81,6 +81,8 @@ pub(crate) struct Shared {
     pub(crate) runtime: HashMap<String, Vec<TunnelConfig>>,
     /// 每隧道运行时指标（bytes_tx/rx/active/total）。
     pub(crate) metrics: crate::metrics::MetricsRegistry,
+    /// 注册/认证节流（M2.5d：节流未授权设备的重试频率）。
+    pub(crate) throttle: crate::throttle::Throttle,
 }
 
 #[derive(Clone)]
@@ -151,6 +153,7 @@ impl Gateway {
                 store: TunnelStore::new(cfg.store_file.clone())?,
                 runtime: HashMap::new(),
                 metrics: crate::metrics::MetricsRegistry::default(),
+                throttle: crate::throttle::Throttle::default(),
             })),
             seq: Arc::new(AtomicU64::new(1)),
             revision: Arc::new(AtomicU64::new(1)),
@@ -370,6 +373,46 @@ async fn handle_control(stream: TcpStream, state: State) -> anyhow::Result<()> {
     let session_tx = control_tx.clone();
     let authenticated = !state.cfg.auth_hmac.contains_key(&device_id)
         || hmac_already_passed;
+    // 节流决策：throttle 期间直接拒绝（防扫描/暴力）
+    // 注意：std::sync::Mutex 的 MutexGuard 不是 Send；锁内不得 await。
+    let throttle_decision = {
+        let mut shared = state.shared.lock().unwrap();
+        shared.throttle.decide(&device_id, Instant::now())
+    };
+    match throttle_decision {
+        crate::throttle::Decision::Allow => {}
+        crate::throttle::Decision::Throttle(rem) => {
+            write_message(
+                &mut wh2,
+                &Message::RegisterAck {
+                    ok: false,
+                    error: Some(format!("注册过于频繁，请 {} 秒后再试", rem.as_secs())),
+                    data_port: 0,
+                    listeners: vec![],
+                    applied_tunnels: vec![],
+                },
+            )
+            .await?;
+            anyhow::bail!("设备 {device_id} 节流中");
+        }
+        crate::throttle::Decision::Ban(rem) => {
+            write_message(
+                &mut wh2,
+                &Message::RegisterAck {
+                    ok: false,
+                    error: Some(format!(
+                        "注册失败过多，已临时封禁 {} 秒",
+                        rem.as_secs()
+                    )),
+                    data_port: 0,
+                    listeners: vec![],
+                    applied_tunnels: vec![],
+                },
+            )
+            .await?;
+            anyhow::bail!("设备 {device_id} 被封禁");
+        }
+    }
     let reg = state.shared.lock().unwrap().registry.register(
         &device_id,
         &token,
@@ -381,6 +424,11 @@ async fn handle_control(stream: TcpStream, state: State) -> anyhow::Result<()> {
     let _replaced = match reg {
         Ok(r) => r,
         Err(RegisterError::BadToken) => {
+            // 记录失败（节流累计）
+            state.shared.lock().unwrap().throttle.record_failure(
+                &device_id,
+                Instant::now(),
+            );
             write_message(
                 &mut wh2,
                 &Message::RegisterAck {
@@ -395,6 +443,13 @@ async fn handle_control(stream: TcpStream, state: State) -> anyhow::Result<()> {
             anyhow::bail!("设备 {device_id} 认证失败");
         }
     };
+    // 注册成功：清除节流累计
+    state
+        .shared
+        .lock()
+        .unwrap()
+        .throttle
+        .record_success(&device_id, Instant::now());
 
     // 2. 生效配置：控制台覆盖优先
     let effective = state
@@ -639,8 +694,8 @@ pub(crate) async fn open_stream_to_device(
     match tokio::time::timeout(state.cfg.stream_setup_timeout, rx).await {
         Ok(Ok(mut agent_stream)) => {
             // 取出 TunnelMetrics 引用（与 Shared.metrics 中的对象相同）；
-            // 锁不必持续持有 — AtomicU64/Mutex 自身 Sync，足以支撑并发计数。
-            let metrics = state
+            // 锁在 await 前立即释放，避免持 std Mutex 跨 await 导致 future 不 Send。
+            let metrics_ptr = state
                 .shared
                 .lock()
                 .unwrap()
@@ -648,7 +703,7 @@ pub(crate) async fn open_stream_to_device(
                 .get_or_create(&target.device_id, &target.tunnel_id) as *const _;
             // SAFETY: TunnelMetrics 内部全是 AtomicU64/Sync Mutex；并发只读是安全的，
             // 关闭流时由 handle_user 关闭计数与设备清理保证生命周期。
-            let metrics: &crate::metrics::TunnelMetrics = unsafe { &*metrics };
+            let metrics: &crate::metrics::TunnelMetrics = unsafe { &*metrics_ptr };
             let _ = copy_bidirectional_counted(&mut user, &mut agent_stream, metrics).await;
             Some(())
         }
