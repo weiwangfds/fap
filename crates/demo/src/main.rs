@@ -59,6 +59,8 @@ fn main() -> anyhow::Result<()> {
         tokio::spawn(run_agent(AgentConfig {
             server_addr: "127.0.0.1:7100".to_string(),
             device_id: "demo-device".into(),
+            user: String::new(),
+            pk: None,
             token: "demo-secret".into(),
             tunnels: vec![TunnelConfig {
                 tunnel_id: "web".into(),

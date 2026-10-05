@@ -13,9 +13,25 @@ pub struct AgentConfig {
     pub server_addr: String,
     pub device_id: String,
     pub token: String,
+    /// 登录用户名（展示用）。
+    #[allow(dead_code)]
+    pub user: String,
+    /// Ed25519 公钥十六进制字符串（M2.5d）。
+    pub pk: Option<String>,
     pub tunnels: Vec<TunnelConfig>,
     pub heartbeat_interval: Duration,
     pub connect_timeout: Duration,
+}
+
+fn hostname() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .unwrap_or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default()
+        })
 }
 
 /// 重连退避：指数增长、封顶、可重置。
@@ -103,6 +119,14 @@ pub async fn run_agent_session(cfg: AgentConfig) -> anyhow::Result<()> {
         &Message::Register {
             device_id: cfg.device_id.clone(),
             token: cfg.token.clone(),
+            device_info: Some(fap_protocol::DeviceInfo {
+                hostname: hostname(),
+                os: std::env::consts::OS.to_string(),
+                arch: std::env::consts::ARCH.to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                user: cfg.user.clone(),
+            }),
+            pk: cfg.pk.clone(),
             tunnels: cfg.tunnels.clone(),
         },
     )

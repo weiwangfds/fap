@@ -54,6 +54,8 @@ fn agent_config(gw: &Gateway, echo: SocketAddr) -> AgentConfig {
     AgentConfig {
         server_addr: format!("127.0.0.1:{}", gw.control_addr.port()),
         device_id: "dev1".into(),
+            user: String::new(),
+            pk: None,
         token: "secret".into(),
         tunnels: vec![TunnelConfig {
             tunnel_id: "web".into(),

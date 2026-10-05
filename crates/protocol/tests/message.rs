@@ -26,6 +26,8 @@ fn register_serializes_tunnels() {
     let msg = Message::Register {
         device_id: "dev1".into(),
         token: "s".into(),
+        device_info: None,
+        pk: None,
         tunnels: vec![TunnelConfig {
             tunnel_id: "web".into(),
             listen_port: 7200,
@@ -41,6 +43,8 @@ fn register_serializes_tunnels() {
             "type": "register",
             "device_id": "dev1",
             "token": "s",
+            "device_info": null,
+            "pk": null,
             "tunnels": [{
                 "tunnel_id": "web",
                 "listen_port": 7200,

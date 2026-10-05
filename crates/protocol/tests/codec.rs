@@ -26,11 +26,15 @@ fn sample_messages() -> Vec<Message> {
         Message::Register {
             device_id: "dev1".into(),
             token: "secret".into(),
+            device_info: None,
+            pk: None,
             tunnels: vec![full_tunnel.clone()],
         },
         Message::Register {
             device_id: "dev1".into(),
             token: "secret".into(),
+            device_info: None,
+            pk: None,
             tunnels: vec![],
         },
         Message::RegisterAck {

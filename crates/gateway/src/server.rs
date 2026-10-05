@@ -225,6 +225,16 @@ impl Gateway {
         self.admin_addr
     }
 
+    /// 设备是否在线。
+    pub fn is_online(&self, device_id: &str) -> bool {
+        self.state.shared.lock().unwrap().registry.is_online(device_id)
+    }
+
+    /// 设备元信息。
+    pub fn device_info(&self, device_id: &str) -> Option<fap_protocol::DeviceInfo> {
+        self.state.shared.lock().unwrap().registry.device_info(device_id)
+    }
+
     /// 停止网关主任务。
     ///
     /// 已知简化：每条隧道的监听任务未逐一跟踪，进程退出时随运行时回收。
@@ -256,6 +266,8 @@ async fn handle_control(stream: TcpStream, state: State) -> anyhow::Result<()> {
     let Message::Register {
         device_id,
         token,
+        device_info,
+        pk: _,
         tunnels: declared,
     } = first
     else {
@@ -269,6 +281,7 @@ async fn handle_control(stream: TcpStream, state: State) -> anyhow::Result<()> {
         &device_id,
         &token,
         control_tx,
+        device_info,
         Instant::now(),
     );
     let _replaced = match reg {

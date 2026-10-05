@@ -5,13 +5,15 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
-use fap_protocol::Message;
+use fap_protocol::{DeviceInfo, Message};
 
 /// 已注册设备的会话信息。
 pub struct DeviceEntry {
     /// 向该设备控制连接下发消息的通道（OpenStream / HeartbeatAck 等）。
     pub control_tx: mpsc::Sender<Message>,
     pub last_heartbeat: Instant,
+    /// agent 上报的设备元信息。
+    pub device_info: Option<DeviceInfo>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -40,6 +42,7 @@ impl DeviceRegistry {
         device_id: &str,
         token: &str,
         control_tx: mpsc::Sender<Message>,
+        device_info: Option<DeviceInfo>,
         now: Instant,
     ) -> Result<bool, RegisterError> {
         match self.auth.get(device_id) {
@@ -52,9 +55,15 @@ impl DeviceRegistry {
             DeviceEntry {
                 control_tx,
                 last_heartbeat: now,
+                device_info,
             },
         );
         Ok(replaced)
+    }
+
+    /// 读取设备元信息（控制台展示用）。
+    pub fn device_info(&self, device_id: &str) -> Option<DeviceInfo> {
+        self.devices.get(device_id).and_then(|e| e.device_info.clone())
     }
 
     pub fn heartbeat(&mut self, device_id: &str, now: Instant) -> bool {
@@ -127,7 +136,7 @@ mod tests {
     fn register_with_valid_token_succeeds() {
         let mut r = DeviceRegistry::new(auth());
         let now = Instant::now();
-        let replaced = r.register("dev1", "secret", tx(), now).unwrap();
+        let replaced = r.register("dev1", "secret", tx(), None, now).unwrap();
         assert!(!replaced, "首次注册不应报告顶替");
         assert!(r.is_online("dev1"));
         assert_eq!(r.online_count(), 1);
@@ -137,7 +146,7 @@ mod tests {
     fn register_with_bad_token_is_rejected() {
         let mut r = DeviceRegistry::new(auth());
         let err = r
-            .register("dev1", "wrong", tx(), Instant::now())
+            .register("dev1", "wrong", tx(), None, Instant::now())
             .unwrap_err();
         assert_eq!(err, RegisterError::BadToken);
         assert!(!r.is_online("dev1"));
@@ -147,7 +156,7 @@ mod tests {
     fn register_unknown_device_is_rejected() {
         let mut r = DeviceRegistry::new(auth());
         let err = r
-            .register("ghost", "secret", tx(), Instant::now())
+            .register("ghost", "secret", tx(), None, Instant::now())
             .unwrap_err();
         assert_eq!(err, RegisterError::BadToken);
     }
@@ -156,10 +165,10 @@ mod tests {
     fn re_register_replaces_session_and_reports_it() {
         let mut r = DeviceRegistry::new(auth());
         let now = Instant::now();
-        r.register("dev1", "secret", tx(), now).unwrap();
+        r.register("dev1", "secret", tx(), None, now).unwrap();
         let old_tx = r.control_tx("dev1").unwrap();
 
-        let replaced = r.register("dev1", "secret", tx(), now).unwrap();
+        let replaced = r.register("dev1", "secret", tx(), None, now).unwrap();
         assert!(replaced, "重复注册应顶替旧会话");
 
         let new_tx = r.control_tx("dev1").unwrap();
@@ -174,11 +183,11 @@ mod tests {
     fn owns_distinguishes_current_and_stale_session() {
         let mut r = DeviceRegistry::new(auth());
         let now = Instant::now();
-        r.register("dev1", "secret", tx(), now).unwrap();
+        r.register("dev1", "secret", tx(), None, now).unwrap();
         let stale = r.control_tx("dev1").unwrap();
         assert!(r.owns("dev1", &stale));
 
-        r.register("dev1", "secret", tx(), now).unwrap();
+        r.register("dev1", "secret", tx(), None, now).unwrap();
         assert!(
             !r.owns("dev1", &stale),
             "旧会话不再是注册者，其断开时不得清理新会话"
@@ -189,7 +198,7 @@ mod tests {
     fn heartbeat_refreshes_timestamp() {
         let mut r = DeviceRegistry::new(auth());
         let t0 = Instant::now();
-        r.register("dev1", "secret", tx(), t0).unwrap();
+        r.register("dev1", "secret", tx(), None, t0).unwrap();
         assert_eq!(r.devices["dev1"].last_heartbeat, t0);
 
         let t1 = t0 + Duration::from_secs(10);
@@ -205,8 +214,8 @@ mod tests {
             ("dev2".to_string(), "s".to_string()),
         ]));
         let t0 = Instant::now();
-        r.register("dev1", "s", tx(), t0).unwrap();
-        r.register("dev2", "s", tx(), t0).unwrap();
+        r.register("dev1", "s", tx(), None, t0).unwrap();
+        r.register("dev2", "s", tx(), None, t0).unwrap();
         // dev1 在 80s 时心跳过，dev2 停留在 0s；判定时刻 100s、超时 30s
         assert!(r.heartbeat("dev1", t0 + Duration::from_secs(80)));
 
@@ -220,7 +229,7 @@ mod tests {
     #[test]
     fn force_remove_drops_device() {
         let mut r = DeviceRegistry::new(auth());
-        r.register("dev1", "secret", tx(), Instant::now()).unwrap();
+        r.register("dev1", "secret", tx(), None, Instant::now()).unwrap();
         assert!(r.force_remove("dev1"));
         assert!(!r.force_remove("dev1"));
         assert!(!r.is_online("dev1"));

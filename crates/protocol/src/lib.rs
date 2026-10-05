@@ -25,6 +25,22 @@ pub const MSG_CONFIG_PUSH: u8 = 7;
 pub const MSG_CONFIG_ACK: u8 = 8;
 pub const MSG_ACCESS_REQUEST: u8 = 9;
 
+/// 注册应答中带回的实际设备信息（agent 上报 → 控制台展示）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DeviceInfo {
+    #[serde(default)]
+    pub hostname: String,
+    #[serde(default)]
+    pub os: String,
+    #[serde(default)]
+    pub arch: String,
+    #[serde(default)]
+    pub version: String,
+    /// 登录用户名（可选）。
+    #[serde(default)]
+    pub user: String,
+}
+
 /// 一条隧道的定义。
 ///
 /// 对外暴露方式（可组合，至少其一）：
@@ -77,6 +93,12 @@ pub enum Message {
     Register {
         device_id: String,
         token: String,
+        /// 设备元信息（hostname/os/arch/version/user），agent 上报到控制台展示。
+        #[serde(default)]
+        device_info: Option<DeviceInfo>,
+        /// agent 的 Ed25519 公钥（M2.5d）；None 表示未启用 PK 模式。
+        #[serde(default)]
+        pk: Option<String>,
         tunnels: Vec<TunnelConfig>,
     },
     RegisterAck {

@@ -124,6 +124,8 @@ async fn devices_endpoint_lists_registered_device_and_tunnels() {
     tokio::spawn(run_agent_session(AgentConfig {
         server_addr: format!("127.0.0.1:{}", gw.control_addr.port()),
         device_id: "dev1".into(),
+            user: String::new(),
+            pk: None,
         token: "secret".into(),
         tunnels: vec![TunnelConfig {
             tunnel_id: "web".into(),
@@ -154,6 +156,8 @@ async fn put_tunnels_pushes_config_to_running_agent() {
     tokio::spawn(run_agent_session(AgentConfig {
         server_addr: format!("127.0.0.1:{}", gw.control_addr.port()),
         device_id: "dev1".into(),
+            user: String::new(),
+            pk: None,
         token: "secret".into(),
         tunnels: vec![],
         heartbeat_interval: Duration::from_secs(5),
@@ -191,6 +195,8 @@ async fn put_tunnels_replaces_old_listeners() {
     tokio::spawn(run_agent_session(AgentConfig {
         server_addr: format!("127.0.0.1:{}", gw.control_addr.port()),
         device_id: "dev1".into(),
+            user: String::new(),
+            pk: None,
         token: "secret".into(),
         tunnels: vec![],
         heartbeat_interval: Duration::from_secs(5),

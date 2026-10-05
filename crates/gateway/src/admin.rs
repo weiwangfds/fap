@@ -78,9 +78,11 @@ async fn devices(State(st): State<Arc<AdminState>>) -> impl IntoResponse {
     let list: Vec<_> = ids
         .into_iter()
         .map(|id| {
+            let info = shared.registry.device_info(&id);
             json!({
                 "device_id": id,
                 "online": shared.registry.is_online(&id),
+                "device_info": info,
                 "tunnels": shared.runtime.get(&id).cloned().unwrap_or_default(),
             })
         })

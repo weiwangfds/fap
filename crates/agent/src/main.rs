@@ -29,6 +29,10 @@ struct Cli {
     /// 心跳间隔（秒）
     #[arg(long, default_value_t = 10)]
     heartbeat_interval_secs: u64,
+
+    /// 登录用户名（控制台展示用）
+    #[arg(long, default_value = "")]
+    user: String,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -52,6 +56,8 @@ fn main() -> anyhow::Result<()> {
         server_addr: cli.server,
         device_id: cli.device_id,
         token: cli.token,
+        user: cli.user,
+        pk: None,
         tunnels,
         heartbeat_interval: Duration::from_secs(cli.heartbeat_interval_secs),
         connect_timeout: Duration::from_secs(5),
