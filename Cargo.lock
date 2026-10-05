@@ -245,6 +245,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fap-access"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "fap-agent",
+ "fap-gateway",
+ "fap-protocol",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fap-agent"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,26 @@
+[package]
+name = "fap-access"
+version = "0.1.0"
+edition = "2021"
+description = "fap 访问器：用户侧本地转发工具，按隧道名+令牌接入共享单端口"
+
+[dependencies]
+fap-protocol = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+fap-gateway = { workspace = true }
+fap-agent = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "fap-access"
+path = "src/main.rs"
+
+[lib]
+name = "fap_access"
+path = "src/lib.rs"

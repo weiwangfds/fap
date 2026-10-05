@@ -5,6 +5,7 @@ members = [
     "crates/gateway",
     "crates/agent",
     "crates/demo",
+    "crates/access",
 ]
 
 [workspace.dependencies]
