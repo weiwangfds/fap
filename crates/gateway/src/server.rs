@@ -75,7 +75,7 @@ impl Default for GatewayConfig {
 pub(crate) struct Shared {
     pub(crate) registry: DeviceRegistry,
     pub(crate) router: TunnelRouter,
-    matcher: StreamMatcher<TcpStream>,
+    pub(crate) matcher: StreamMatcher<TcpStream>,
     pub(crate) store: TunnelStore,
     /// 各设备当前实际生效的隧道全集（注册与控制台下发都会更新）。
     pub(crate) runtime: HashMap<String, Vec<TunnelConfig>>,
@@ -561,7 +561,14 @@ pub(crate) async fn apply_tunnels(
     let bound = bind_tunnels(state, tunnels).await?;
     {
         let mut shared = state.shared.lock().unwrap();
-        shared.router.register_bound(device_id, &bound)?;
+        // 完整登记：独占端口 + host/path/SNI/访问器路由（M3）
+        if let Err(e) = shared.router.register_full(device_id, tunnels, &bound) {
+            // 回滚已绑定的监听：让对应 tunnel_accept_loop 自然退出
+            for (_, p) in &bound {
+                let _ = state.wake.send(*p);
+            }
+            return Err(e.into());
+        }
         shared
             .runtime
             .insert(device_id.to_string(), tunnels.to_vec());
@@ -575,6 +582,12 @@ async fn bind_tunnels(
 ) -> anyhow::Result<Vec<(String, u16)>> {
     let mut bound = Vec::new();
     for t in tunnels {
+        // M3 语义：listen_port=0 且配置了 host/sni 的隧道走共享单端口，不绑独占端口
+        let shared_only =
+            t.listen_port == 0 && (t.host.is_some() || t.sni.is_some());
+        if shared_only {
+            continue;
+        }
         let addr = SocketAddr::new(state.bind_ip, t.listen_port);
         let listener = bind_with_retry(addr).await?;
         let port = listener.local_addr()?.port();
