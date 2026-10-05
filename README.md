@@ -8,13 +8,26 @@ fap 的目标是「frp 的数据面 + 向日葵式的托管体验」：
 
 技术栈：**Rust**（gateway / agent 核心）+ **Next.js + TailwindCSS v4 + shadcn/ui**（控制台）。
 
-## 当前进度（M1 已完成）
+## 当前进度
 
 - [x] **M1** Rust 最小闭环：agent 注册 + 认证 + 心跳 + TCP 隧道 + 双向转发
-- [ ] **M2** Next.js 控制台 + 隧道规则下发（`apps/console`）
-- [ ] **M3** 单端口路由：SNI / HTTP 后缀 + 控制台反代
-- [ ] **M4** 访问器协议 + agent 内嵌本地管理页（rust-embed 静态导出）
-- [ ] **M5** 多用户、ACL、审计、限流
+- [x] **M2** admin API + 隧道规则实时下发（`GET/PUT /api/devices/{id}/tunnels`）
+- [x] **M2.5** 设备元信息上报 / 每隧道流量指标 / HMAC-SHA256 挑战认证 / 注册节流
+- [x] **M3** 单端口承诺：HTTP Host/Path + SNI 直通 + 控制台反代 + TOML 配置
+- [x] **M4** 访问器协议（AccessRequest → 裸管道）+ `fap-access` 本地转发工具
+- [x] **M5a** 审计日志 + ACL（`allowed_ips` CIDR）+ fail2ban 式节流
+- [ ] **M4c** agent 本地管理页嵌入（Next.js 静态导出 + rust-embed）
+- [ ] **M5b/c** admin 多用户鉴权 / yamux 多路复用 / 直连打洞
+- [ ] **M6** Next.js + Tailwind v4 + shadcn 控制台
+
+## 安全模型
+
+| 模式 | 配置 | 说明 |
+|---|---|---|
+| 明文 token | `[auth] dev = "secret"` | 开发用 |
+| HMAC-SHA256 | `[auth_hmac] dev = "<64位hex>"` | 挑战响应，120s 时钟窗口，常量时间比较 |
+| 节流 | 自动 | fail2ban 语义：正确凭证总放行，连续 5 次失败封禁 10 分钟 |
+| ACL | 隧道 `allowed_ips = ["10.0.0.0/8"]` | 空表不限，CIDR 匹配，拒绝入审计 |
 
 ## 快速开始
 
