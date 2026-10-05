@@ -37,6 +37,8 @@ pub struct GatewayConfig {
     pub admin_token: Option<String>,
     /// 控制台配置落盘文件；None = 不持久化。
     pub store_file: Option<PathBuf>,
+    /// 审计日志 JSONL 落盘文件；None = 仅内存环形缓冲。
+    pub audit_file: Option<PathBuf>,
     /// 控制台反代目标（Next.js 控制台进程地址），按 Host/SNI 匹配 console_host。
     pub console_backend: Option<SocketAddr>,
     /// 共享端口上识别为控制台的域名。
@@ -61,6 +63,7 @@ impl Default for GatewayConfig {
             admin_addr: None,
             admin_token: None,
             store_file: None,
+            audit_file: None,
             console_backend: None,
             console_host: None,
             auth: HashMap::new(),
@@ -83,6 +86,8 @@ pub(crate) struct Shared {
     pub(crate) metrics: crate::metrics::MetricsRegistry,
     /// 注册/认证节流（M2.5d：节流未授权设备的重试频率）。
     pub(crate) throttle: crate::throttle::Throttle,
+    /// 审计日志（M5a）。
+    pub(crate) audit: crate::audit::AuditLog,
 }
 
 #[derive(Clone)]
@@ -154,6 +159,10 @@ impl Gateway {
                 runtime: HashMap::new(),
                 metrics: crate::metrics::MetricsRegistry::default(),
                 throttle: crate::throttle::Throttle::default(),
+                audit: crate::audit::AuditLog::new(
+                    1024,
+                    cfg.audit_file.as_ref().map(std::path::PathBuf::from),
+                ),
             })),
             seq: Arc::new(AtomicU64::new(1)),
             revision: Arc::new(AtomicU64::new(1)),
@@ -371,47 +380,32 @@ async fn handle_control(stream: TcpStream, state: State) -> anyhow::Result<()> {
     // 1. 认证并登记会话
     let (control_tx, control_rx) = mpsc::channel::<Message>(64);
     let session_tx = control_tx.clone();
-    let authenticated = !state.cfg.auth_hmac.contains_key(&device_id)
-        || hmac_already_passed;
-    // 节流决策：throttle 期间直接拒绝（防扫描/暴力）
+    // 仅当设备走 HMAC 模式且挑战已通过，才跳过 legacy token 校验。
+    // （此前这里逻辑写反导致任何 token 都能注册——e2e bad_token 用例抓住了它。）
+    let authenticated = state.cfg.auth_hmac.contains_key(&device_id) && hmac_already_passed;
+    // 节流策略（fail2ban 语义）：正确凭证总是放行；
+    // 连续失败达到阈值进入封禁后，入口直接拒绝（防暴力穷举）。
     // 注意：std::sync::Mutex 的 MutexGuard 不是 Send；锁内不得 await。
     let throttle_decision = {
         let mut shared = state.shared.lock().unwrap();
         shared.throttle.decide(&device_id, Instant::now())
     };
-    match throttle_decision {
-        crate::throttle::Decision::Allow => {}
-        crate::throttle::Decision::Throttle(rem) => {
-            write_message(
-                &mut wh2,
-                &Message::RegisterAck {
-                    ok: false,
-                    error: Some(format!("注册过于频繁，请 {} 秒后再试", rem.as_secs())),
-                    data_port: 0,
-                    listeners: vec![],
-                    applied_tunnels: vec![],
-                },
-            )
-            .await?;
-            anyhow::bail!("设备 {device_id} 节流中");
-        }
-        crate::throttle::Decision::Ban(rem) => {
-            write_message(
-                &mut wh2,
-                &Message::RegisterAck {
-                    ok: false,
-                    error: Some(format!(
-                        "注册失败过多，已临时封禁 {} 秒",
-                        rem.as_secs()
-                    )),
-                    data_port: 0,
-                    listeners: vec![],
-                    applied_tunnels: vec![],
-                },
-            )
-            .await?;
-            anyhow::bail!("设备 {device_id} 被封禁");
-        }
+    if let crate::throttle::Decision::Ban(rem) = throttle_decision {
+        write_message(
+            &mut wh2,
+            &Message::RegisterAck {
+                ok: false,
+                error: Some(format!(
+                    "注册失败过多，已临时封禁 {} 秒",
+                    rem.as_secs()
+                )),
+                data_port: 0,
+                listeners: vec![],
+                applied_tunnels: vec![],
+            },
+        )
+        .await?;
+        anyhow::bail!("设备 {device_id} 被封禁");
     }
     let reg = state.shared.lock().unwrap().registry.register(
         &device_id,
@@ -424,11 +418,12 @@ async fn handle_control(stream: TcpStream, state: State) -> anyhow::Result<()> {
     let _replaced = match reg {
         Ok(r) => r,
         Err(RegisterError::BadToken) => {
-            // 记录失败（节流累计）
-            state.shared.lock().unwrap().throttle.record_failure(
-                &device_id,
-                Instant::now(),
-            );
+            // 记录失败（节流累计 + 审计）
+            {
+                let mut shared = state.shared.lock().unwrap();
+                shared.throttle.record_failure(&device_id, Instant::now());
+                shared.audit.record("register_fail", &device_id, "令牌或签名错误");
+            }
             write_message(
                 &mut wh2,
                 &Message::RegisterAck {
@@ -443,13 +438,12 @@ async fn handle_control(stream: TcpStream, state: State) -> anyhow::Result<()> {
             anyhow::bail!("设备 {device_id} 认证失败");
         }
     };
-    // 注册成功：清除节流累计
-    state
-        .shared
-        .lock()
-        .unwrap()
-        .throttle
-        .record_success(&device_id, Instant::now());
+    // 注册成功：清除节流累计 + 审计
+    {
+        let mut shared = state.shared.lock().unwrap();
+        shared.throttle.record_success(&device_id, Instant::now());
+        shared.audit.record("register_ok", &device_id, "注册成功");
+    }
 
     // 2. 生效配置：控制台覆盖优先
     let effective = state

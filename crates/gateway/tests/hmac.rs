@@ -180,8 +180,8 @@ async fn hmac_skewed_timestamp_is_rejected() {
     let Message::AuthChallenge { nonce, ts_ms } = msg else {
         panic!();
     };
-    // 故意使用过期 ts
-    let skewed = ts_ms.wrapping_sub(Duration::from_secs(120).as_millis() as u64);
+    // 故意使用过期 ts（300s 前，远超 120s 窗口）
+    let skewed = ts_ms.wrapping_sub(Duration::from_secs(300).as_millis() as u64);
     let sig = hmac::compute(&secret, &nonce, skewed);
     write_message(
         &mut conn,

@@ -44,6 +44,7 @@ pub(crate) async fn serve(
             "/api/devices/{device}/tunnels/{tunnel}/metrics",
             get(get_tunnel_metrics),
         )
+        .route("/api/audit", get(audit))
         .layer(middleware::from_fn_with_state(st.clone(), auth))
         .with_state(st);
     axum::serve(listener, app).await?;
@@ -113,6 +114,18 @@ async fn get_tunnel_metrics(
         )
             .into_response(),
     }
+}
+
+async fn audit(
+    State(st): State<Arc<AdminState>>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let limit: usize = q
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
+    let events = st.state.shared.lock().unwrap().audit.recent(limit);
+    Json(serde_json::json!({"events": events}))
 }
 
 async fn get_tunnels(

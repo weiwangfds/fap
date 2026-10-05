@@ -64,6 +64,21 @@ async fn handle_conn(conn: &mut TcpStream, peer: SocketAddr, state: &State) -> a
     Ok(())
 }
 
+/// ACL：检查来源 IP 是否被隧道的 allowed_ips 允许（空列表 = 不限）。
+/// 返回 false 时应拒绝连接并记审计。
+fn acl_allows(state: &State, target: &RouteTarget, peer: SocketAddr) -> bool {
+    let allowed = {
+        let shared = state.shared.lock().unwrap();
+        shared
+            .runtime
+            .get(&target.device_id)
+            .and_then(|ts| ts.iter().find(|t| t.tunnel_id == target.tunnel_id))
+            .map(|t| t.allowed_ips.clone())
+            .unwrap_or_default()
+    };
+    crate::acl::ip_allowed(peer.ip(), &allowed)
+}
+
 /// 访问器：读 AccessRequest 帧 → 验证 token → OpenStream → 裸管道。
 async fn handle_access(conn: &mut TcpStream, state: &State) -> anyhow::Result<()> {
     let msg = match fap_protocol::read_message_exact(conn).await {
@@ -82,9 +97,27 @@ async fn handle_access(conn: &mut TcpStream, state: &State) -> anyhow::Result<()
     let target = state.shared.lock().unwrap().router.route_access(&tunnel_id, &token);
     let Some(target) = target else {
         debug!("shared_port access: 隧道 {tunnel_id} 令牌无效或未启用访问器");
+        state
+            .shared
+            .lock()
+            .unwrap()
+            .audit
+            .record("access_reject", &tunnel_id, "令牌无效或未启用访问器");
         conn.shutdown().await.ok();
         return Ok(());
     };
+    // ACL：来源 IP 校验
+    let peer = conn.peer_addr()?;
+    if !acl_allows(state, &target, peer) {
+        state
+            .shared
+            .lock()
+            .unwrap()
+            .audit
+            .record("access_reject", &tunnel_id, &format!("ACL 拒绝 {peer}"));
+        conn.shutdown().await.ok();
+        return Ok(());
+    }
     // 验证通过：连接变成到内网服务的裸管道（不转发 AccessRequest 帧本身）
     relay_via_agent(conn, state, target, None).await
 }
@@ -145,6 +178,18 @@ async fn route_http(conn: &mut TcpStream, state: &State, _peek: &[u8]) -> anyhow
         .router
         .route_http(&head.host, &head.path);
     if let Some(target) = route {
+        // ACL：来源 IP 校验
+        let peer = conn.peer_addr()?;
+        if !acl_allows(&state, &target, peer) {
+            state
+                .shared
+                .lock()
+                .unwrap()
+                .audit
+                .record("access_reject", &target.tunnel_id, &format!("ACL 拒绝 {peer}（HTTP）"));
+            conn.shutdown().await.ok();
+            return Ok(());
+        }
         // 反向代理：把请求（清理 hop-by-hop 后）发给 agent
         return reverse_proxy_to_agent(conn, &state, target, &head, &buf, body_so_far).await;
     }

@@ -20,6 +20,9 @@ pub struct GatewayToml {
     pub admin_token: Option<String>,
     #[serde(default)]
     pub store_file: Option<String>,
+    /// 审计日志 JSONL 落盘文件；缺省仅内存。
+    #[serde(default)]
+    pub audit_file: Option<String>,
     #[serde(default)]
     pub console_backend: Option<String>,
     #[serde(default)]
