@@ -1,0 +1,24 @@
+[package]
+name = "fap-gateway"
+version = "0.1.0"
+edition = "2021"
+description = "fap 网关（服务端核心）"
+
+[dependencies]
+fap-protocol = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+clap = { workspace = true }
+tracing-subscriber = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+fap-agent = { workspace = true }
+
+[[bin]]
+name = "fap-gateway"
+path = "src/main.rs"

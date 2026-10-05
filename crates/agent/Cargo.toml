@@ -1,0 +1,18 @@
+[package]
+name = "fap-agent"
+version = "0.1.0"
+edition = "2021"
+description = "fap 客户端（内网侧守护进程核心）"
+
+[dependencies]
+fap-protocol = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+clap = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[[bin]]
+name = "fap-agent"
+path = "src/main.rs"

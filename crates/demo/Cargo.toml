@@ -1,0 +1,16 @@
+[package]
+name = "fap-demo"
+version = "0.1.0"
+edition = "2021"
+description = "fap 端到端演示：echo 服务 + 网关 + 客户端 + 访问者"
+
+[dependencies]
+fap-protocol = { workspace = true }
+fap-gateway = { workspace = true }
+fap-agent = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+
+[[bin]]
+name = "fap-demo"
+path = "src/main.rs"

@@ -1,0 +1,11 @@
+[package]
+name = "fap-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "fap 控制协议：agent 与 gateway 之间的消息定义与帧编解码"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
