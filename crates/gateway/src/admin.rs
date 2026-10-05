@@ -40,6 +40,10 @@ pub(crate) async fn serve(
             "/api/devices/{device}/tunnels",
             get(get_tunnels).put(put_tunnels),
         )
+        .route(
+            "/api/devices/{device}/tunnels/{tunnel}/metrics",
+            get(get_tunnel_metrics),
+        )
         .layer(middleware::from_fn_with_state(st.clone(), auth))
         .with_state(st);
     axum::serve(listener, app).await?;
@@ -88,6 +92,27 @@ async fn devices(State(st): State<Arc<AdminState>>) -> impl IntoResponse {
         })
         .collect();
     Json(json!({"devices": list}))
+}
+
+async fn get_tunnel_metrics(
+    State(st): State<Arc<AdminState>>,
+    Path((device, tunnel)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let snap = st
+        .state
+        .shared
+        .lock()
+        .unwrap()
+        .metrics
+        .snapshot(&device, &tunnel);
+    match snap {
+        Some(s) => (StatusCode::OK, Json(s)).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "该隧道尚无指标（可能尚未有流量）"})),
+        )
+            .into_response(),
+    }
 }
 
 async fn get_tunnels(

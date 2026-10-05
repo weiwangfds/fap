@@ -75,6 +75,8 @@ pub(crate) struct Shared {
     pub(crate) store: TunnelStore,
     /// 各设备当前实际生效的隧道全集（注册与控制台下发都会更新）。
     pub(crate) runtime: HashMap<String, Vec<TunnelConfig>>,
+    /// 每隧道运行时指标（bytes_tx/rx/active/total）。
+    pub(crate) metrics: crate::metrics::MetricsRegistry,
 }
 
 #[derive(Clone)]
@@ -144,6 +146,7 @@ impl Gateway {
                 matcher: StreamMatcher::new(),
                 store: TunnelStore::new(cfg.store_file.clone())?,
                 runtime: HashMap::new(),
+                metrics: crate::metrics::MetricsRegistry::default(),
             })),
             seq: Arc::new(AtomicU64::new(1)),
             revision: Arc::new(AtomicU64::new(1)),
@@ -233,6 +236,20 @@ impl Gateway {
     /// 设备元信息。
     pub fn device_info(&self, device_id: &str) -> Option<fap_protocol::DeviceInfo> {
         self.state.shared.lock().unwrap().registry.device_info(device_id)
+    }
+
+    /// 某隧道的实时指标快照。
+    pub fn metrics(
+        &self,
+        device_id: &str,
+        tunnel_id: &str,
+    ) -> Option<crate::metrics::MetricsSnapshot> {
+        self.state
+            .shared
+            .lock()
+            .unwrap()
+            .metrics
+            .snapshot(device_id, tunnel_id)
     }
 
     /// 停止网关主任务。
@@ -499,12 +516,26 @@ pub(crate) async fn handle_user(mut user: TcpStream, port: u16, state: State) {
     };
 
     let stream_id = state.seq.fetch_add(1, Ordering::Relaxed);
-    if open_stream_to_device(&state, &control, &target, stream_id, user).await.is_none() {
-        state.shared.lock().unwrap().matcher.cancel(stream_id);
-    }
+    // 指标：open_stream（无论转发成功失败，结束时都需 close）
+    state
+        .shared
+        .lock()
+        .unwrap()
+        .metrics
+        .get_or_create(&target.device_id, &target.tunnel_id)
+        .open_stream();
+    open_stream_to_device(&state, &control, &target, stream_id, user).await;
+    // 收尾：close_stream（无论成功/失败/超时都计数归零）
+    state
+        .shared
+        .lock()
+        .unwrap()
+        .metrics
+        .get_or_create(&target.device_id, &target.tunnel_id)
+        .close_stream();
 }
 
-/// 通用开流：请求 agent 建数据连接，等待配对后双向转发。
+/// 通用开流：请求 agent 建数据连接，等待配对后双向转发（带字节计数）。
 /// 返回 Some(()) 表示完成了一次转发（无论字节数多少）。
 pub(crate) async fn open_stream_to_device(
     state: &State,
@@ -531,7 +562,18 @@ pub(crate) async fn open_stream_to_device(
 
     match tokio::time::timeout(state.cfg.stream_setup_timeout, rx).await {
         Ok(Ok(mut agent_stream)) => {
-            let _ = tokio::io::copy_bidirectional(&mut user, &mut agent_stream).await;
+            // 取出 TunnelMetrics 引用（与 Shared.metrics 中的对象相同）；
+            // 锁不必持续持有 — AtomicU64/Mutex 自身 Sync，足以支撑并发计数。
+            let metrics = state
+                .shared
+                .lock()
+                .unwrap()
+                .metrics
+                .get_or_create(&target.device_id, &target.tunnel_id) as *const _;
+            // SAFETY: TunnelMetrics 内部全是 AtomicU64/Sync Mutex；并发只读是安全的，
+            // 关闭流时由 handle_user 关闭计数与设备清理保证生命周期。
+            let metrics: &crate::metrics::TunnelMetrics = unsafe { &*metrics };
+            let _ = copy_bidirectional_counted(&mut user, &mut agent_stream, metrics).await;
             Some(())
         }
         _ => {
@@ -540,6 +582,46 @@ pub(crate) async fn open_stream_to_device(
             None
         }
     }
+}
+
+/// 双向转发，期间按字节累加到 metrics。
+/// 返回 (tx_bytes, rx_bytes)。
+async fn copy_bidirectional_counted(
+    a: &mut TcpStream,
+    b: &mut TcpStream,
+    metrics: &crate::metrics::TunnelMetrics,
+) -> std::io::Result<(u64, u64)> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut ar, mut aw) = a.split();
+    let (mut br, mut bw) = b.split();
+    let mut buf_a = [0u8; 8192];
+    let mut buf_b = [0u8; 8192];
+    let mut tx = 0u64;
+    let mut rx = 0u64;
+    let mut a_done = false;
+    let mut b_done = false;
+    while !(a_done && b_done) {
+        tokio::select! {
+            r = ar.read(&mut buf_a), if !a_done => match r {
+                Ok(0) => {
+                    // 半关闭：用户侧关闭，通知内网侧 EOF
+                    a_done = true;
+                    let _ = bw.shutdown().await;
+                }
+                Ok(n) => { rx += n as u64; metrics.add_rx(n as u64); if bw.write_all(&buf_a[..n]).await.is_err() { b_done = true; a_done = true; } }
+                Err(_) => { a_done = true; b_done = true; }
+            },
+            r = br.read(&mut buf_b), if !b_done => match r {
+                Ok(0) => {
+                    b_done = true;
+                    let _ = aw.shutdown().await;
+                }
+                Ok(n) => { tx += n as u64; metrics.add_tx(n as u64); if aw.write_all(&buf_b[..n]).await.is_err() { a_done = true; b_done = true; } }
+                Err(_) => { a_done = true; b_done = true; }
+            },
+        }
+    }
+    Ok((tx, rx))
 }
 
 async fn data_accept_loop(listener: TcpListener, state: State) -> anyhow::Result<()> {
