@@ -12,6 +12,8 @@ use crate::protocol_tls::parse_sni;
 use crate::router::RouteTarget;
 use crate::server::State;
 
+use fap_protocol::Message;
+
 /// 受理共享端口连接：嗅探首字节后路由。
 pub(crate) async fn serve(listener: TcpListener, _addr: SocketAddr, state: State) {
     loop {
@@ -50,10 +52,41 @@ async fn handle_conn(conn: &mut TcpStream, peer: SocketAddr, state: &State) -> a
         return route_http(conn, &state, buf).await;
     }
 
-    // 其它：直接 400 关闭
+    if buf[0] == 0x00 {
+        // 访问器协议：首帧 AccessRequest（帧长度高字节为 0x00）。
+        // 注意 peek 不消费 —— 用 read_message_exact 从 socket 精确读帧。
+        return handle_access(conn, &state).await;
+    }
+
+    // 其它：直接关闭
     debug!("shared_port {peer}: 未知首字节");
     conn.shutdown().await.ok();
     Ok(())
+}
+
+/// 访问器：读 AccessRequest 帧 → 验证 token → OpenStream → 裸管道。
+async fn handle_access(conn: &mut TcpStream, state: &State) -> anyhow::Result<()> {
+    let msg = match fap_protocol::read_message_exact(conn).await {
+        Ok(m) => m,
+        Err(e) => {
+            debug!("shared_port access: 首帧读取失败: {e}");
+            conn.shutdown().await.ok();
+            return Ok(());
+        }
+    };
+    let Message::AccessRequest { tunnel_id, token } = msg else {
+        conn.shutdown().await.ok();
+        return Ok(());
+    };
+    // 路由 + token 验证
+    let target = state.shared.lock().unwrap().router.route_access(&tunnel_id, &token);
+    let Some(target) = target else {
+        debug!("shared_port access: 隧道 {tunnel_id} 令牌无效或未启用访问器");
+        conn.shutdown().await.ok();
+        return Ok(());
+    };
+    // 验证通过：连接变成到内网服务的裸管道（不转发 AccessRequest 帧本身）
+    relay_via_agent(conn, state, target, None).await
 }
 
 fn is_http_method_start(buf: &[u8]) -> bool {
@@ -299,13 +332,14 @@ async fn reverse_proxy_console(
     Ok(())
 }
 
-async fn forward_to_agent(
+/// 通用中继：OpenStream 到 agent 数据面 → 可选 preface → 双向裸转发。
+/// TLS pass-through（preface=peeked ClientHello）与访问器（preface=None）共用。
+async fn relay_via_agent(
     conn: &mut TcpStream,
     state: &State,
     target: RouteTarget,
-    peek: &[u8],
+    preface: Option<&[u8]>,
 ) -> anyhow::Result<()> {
-    // TLS pass-through：把 peek + conn 剩余字节按字节流转发到 agent 数据面。
     let stream_id = state.next_stream_id();
     let device_id = target.device_id.clone();
     let tunnel_id = target.tunnel_id.clone();
@@ -324,6 +358,13 @@ async fn forward_to_agent(
         .control_tx(&device_id);
     let Some(control) = control else {
         conn.shutdown().await.ok();
+        let _ = state
+            .shared
+            .lock()
+            .unwrap()
+            .metrics
+            .get_or_create(&device_id, &tunnel_id)
+            .close_stream();
         return Ok(());
     };
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -337,17 +378,33 @@ async fn forward_to_agent(
         .is_err()
     {
         state.shared.lock().unwrap().matcher.cancel(stream_id);
+        let _ = state
+            .shared
+            .lock()
+            .unwrap()
+            .metrics
+            .get_or_create(&device_id, &tunnel_id)
+            .close_stream();
         return Ok(());
     }
     let mut agent = match tokio::time::timeout(state.cfg.stream_setup_timeout, rx).await {
         Ok(Ok(s)) => s,
         _ => {
             state.shared.lock().unwrap().matcher.cancel(stream_id);
+            let _ = state
+                .shared
+                .lock()
+                .unwrap()
+                .metrics
+                .get_or_create(&device_id, &tunnel_id)
+                .close_stream();
             return Ok(());
         }
     };
-    if !peek.is_empty() {
-        agent.write_all(peek).await.ok();
+    if let Some(p) = preface {
+        if !p.is_empty() {
+            agent.write_all(p).await.ok();
+        }
     }
     let _ = tokio::io::copy_bidirectional(conn, &mut agent).await;
     let _ = state
@@ -358,6 +415,16 @@ async fn forward_to_agent(
         .get_or_create(&device_id, &tunnel_id)
         .close_stream();
     Ok(())
+}
+
+async fn forward_to_agent(
+    conn: &mut TcpStream,
+    state: &State,
+    target: RouteTarget,
+    peek: &[u8],
+) -> anyhow::Result<()> {
+    // TLS pass-through：peek 的 ClientHello 作为 preface，其后字节流式透传。
+    relay_via_agent(conn, state, target, Some(peek)).await
 }
 
 async fn tls_passthrough_no_route(conn: &mut TcpStream) -> anyhow::Result<()> {
