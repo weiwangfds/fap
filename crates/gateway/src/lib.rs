@@ -2,6 +2,7 @@
 pub mod admin;
 pub mod metrics;
 pub mod protocol_http;
+pub mod protocol_tls;
 pub mod registry;
 pub mod router;
 pub mod shared_port;
