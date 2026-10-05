@@ -5,6 +5,7 @@
 
 use std::io;
 
+pub mod config;
 pub mod hmac;
 
 use serde::{Deserialize, Serialize};

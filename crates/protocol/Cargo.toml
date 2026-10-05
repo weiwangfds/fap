@@ -9,5 +9,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-hmac = "0.12"
-sha2 = "0.10"
+toml = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }

@@ -9,20 +9,24 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser, Debug)]
 #[command(name = "fap-agent", version, about = "fap 内网穿透客户端（内网侧）")]
 struct Cli {
+    /// TOML 配置文件路径
+    #[arg(long)]
+    config: Option<String>,
+
     /// 网关控制面地址（host:port）
     #[arg(long, default_value = "127.0.0.1:7100")]
     server: String,
 
     /// 设备 ID（需与网关 --auth 中的登记一致）
     #[arg(long)]
-    device_id: String,
+    device_id: Option<String>,
 
     /// 设备令牌
     #[arg(long)]
-    token: String,
+    token: Option<String>,
 
     /// 隧道规格 NAME:PORT:TARGET_HOST:TARGET_PORT，可重复多次。
-    /// PORT 填 0 表示由网关自动分配。
+    /// PORT 填 0 表示由网关自动分配（或走共享单端口）。
     #[arg(long = "tunnel", value_name = "NAME:PORT:TARGET_HOST:TARGET_PORT")]
     tunnels: Vec<String>,
 
@@ -43,23 +47,61 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    if cli.tunnels.is_empty() {
-        anyhow::bail!("至少需要一个 --tunnel NAME:PORT:TARGET_HOST:TARGET_PORT");
-    }
 
-    let mut tunnels = Vec::new();
+    let (cfg_server, cfg_device, cfg_token, cfg_user, mut tunnels, hb_secs) =
+        if let Some(path) = &cli.config {
+            let src = std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("读取配置 {path} 失败: {e}"))?;
+            let t = fap_protocol::config::AgentToml::from_toml_str(&src)
+                .map_err(|e| anyhow::anyhow!("解析配置 {path} 失败: {e}"))?;
+            t.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
+            (
+                t.server_addr,
+                t.device_id,
+                t.token,
+                t.user,
+                t.tunnels,
+                t.heartbeat_interval_secs,
+            )
+        } else {
+            (
+                cli.server.clone(),
+                String::new(),
+                String::new(),
+                String::new(),
+                Vec::new(),
+                cli.heartbeat_interval_secs,
+            )
+        };
+
+    let server = if cli.server != "127.0.0.1:7100" || cfg_server.is_empty() {
+        cli.server.clone()
+    } else {
+        cfg_server
+    };
+    let device_id = cli.device_id.clone().filter(|s| !s.is_empty()).unwrap_or(cfg_device);
+    let token = cli.token.clone().filter(|s| !s.is_empty()).unwrap_or(cfg_token);
+    let user = if !cli.user.is_empty() { cli.user.clone() } else { cfg_user };
+
+    // 命令行 --tunnel 追加（优先于配置文件）
     for spec in &cli.tunnels {
         tunnels.push(parse_tunnel_spec(spec)?);
     }
+    if tunnels.is_empty() {
+        anyhow::bail!("至少需要一个 --tunnel 规格或配置文件中的 [[tunnels]]");
+    }
+    if device_id.is_empty() || token.is_empty() {
+        anyhow::bail!("需要 --device-id/--token 或 --config agent.toml");
+    }
 
     let cfg = AgentConfig {
-        server_addr: cli.server,
-        device_id: cli.device_id,
-        token: cli.token,
-        user: cli.user,
+        server_addr: server,
+        device_id,
+        token,
+        user,
         pk: None,
         tunnels,
-        heartbeat_interval: Duration::from_secs(cli.heartbeat_interval_secs),
+        heartbeat_interval: Duration::from_secs(hb_secs),
         connect_timeout: Duration::from_secs(5),
     };
 
