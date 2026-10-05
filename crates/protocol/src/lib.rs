@@ -5,6 +5,8 @@
 
 use std::io;
 
+pub mod hmac;
+
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -24,6 +26,10 @@ pub const MSG_STREAM_CONN: u8 = 6;
 pub const MSG_CONFIG_PUSH: u8 = 7;
 pub const MSG_CONFIG_ACK: u8 = 8;
 pub const MSG_ACCESS_REQUEST: u8 = 9;
+pub const MSG_AUTH_CHALLENGE: u8 = 10;
+pub const MSG_AUTH_CHALLENGE_RESP: u8 = 11;
+/// HMAC 摘要长度（SHA-256 = 32 字节）。
+pub const HMAC_BYTES: usize = 32;
 
 /// 注册应答中带回的实际设备信息（agent 上报 → 控制台展示）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -143,6 +149,16 @@ pub enum Message {
         tunnel_id: String,
         token: String,
     },
+    /// 网关 → agent：发送 nonce+ts 挑战。
+    AuthChallenge {
+        nonce: [u8; HMAC_BYTES],
+        ts_ms: u64,
+    },
+    /// agent → 网关：HMAC-SHA256(secret, nonce || ts) 的前 32 字节。
+    AuthChallengeResp {
+        sig: [u8; HMAC_BYTES],
+        ts_ms: u64,
+    },
 }
 
 impl Message {
@@ -158,6 +174,8 @@ impl Message {
             Message::ConfigPush { .. } => MSG_CONFIG_PUSH,
             Message::ConfigAck { .. } => MSG_CONFIG_ACK,
             Message::AccessRequest { .. } => MSG_ACCESS_REQUEST,
+            Message::AuthChallenge { .. } => MSG_AUTH_CHALLENGE,
+            Message::AuthChallengeResp { .. } => MSG_AUTH_CHALLENGE_RESP,
         }
     }
 
@@ -173,6 +191,8 @@ impl Message {
             MSG_CONFIG_PUSH => "config_push",
             MSG_CONFIG_ACK => "config_ack",
             MSG_ACCESS_REQUEST => "access_request",
+            MSG_AUTH_CHALLENGE => "auth_challenge",
+            MSG_AUTH_CHALLENGE_RESP => "auth_challenge_resp",
             _ => return None,
         })
     }

@@ -12,8 +12,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use fap_protocol::{
-    read_message, read_message_exact, write_message, FrameDecoder, ListenerInfo, Message,
-    TunnelConfig,
+    hmac, read_message, read_message_exact, write_message, FrameDecoder, ListenerInfo, Message,
+    TunnelConfig, HMAC_BYTES,
 };
 
 use crate::admin;
@@ -41,8 +41,11 @@ pub struct GatewayConfig {
     pub console_backend: Option<SocketAddr>,
     /// 共享端口上识别为控制台的域名。
     pub console_host: Option<String>,
-    /// 设备凭证表：device_id -> token。
+    /// 明文 token 表：device_id -> token（M2 兼容）。
     pub auth: HashMap<String, String>,
+    /// HMAC-SHA256 共享密钥表：device_id -> 32 字节密钥（M2.5c）。
+    /// 若设备同时出现在两表里，HMAC 优先。
+    pub auth_hmac: HashMap<String, [u8; HMAC_BYTES]>,
     /// 心跳超时，超时设备被清理；0 表示不清理。
     pub heartbeat_timeout: Duration,
     /// 用户连接等待 agent 建流的超时。
@@ -61,6 +64,7 @@ impl Default for GatewayConfig {
             console_backend: None,
             console_host: None,
             auth: HashMap::new(),
+            auth_hmac: HashMap::new(),
             heartbeat_timeout: Duration::from_secs(30),
             stream_setup_timeout: Duration::from_secs(8),
         }
@@ -276,8 +280,9 @@ async fn control_accept_loop(listener: TcpListener, state: State) -> anyhow::Res
 }
 
 async fn handle_control(stream: TcpStream, state: State) -> anyhow::Result<()> {
-    let (mut rh, mut wh) = stream.into_split();
+    let (mut rh, mut wh2) = stream.into_split();
     let mut dec = FrameDecoder::new();
+    let mut hmac_already_passed = false;
 
     let first = read_message(&mut rh, &mut dec).await?;
     let Message::Register {
@@ -291,21 +296,93 @@ async fn handle_control(stream: TcpStream, state: State) -> anyhow::Result<()> {
         anyhow::bail!("首条消息必须是 Register");
     };
 
+    // HMAC 优先：若设备在 auth_hmac 表里，走 challenge-response。
+    if state.cfg.auth_hmac.contains_key(&device_id) {
+        let secret = state.cfg.auth_hmac[&device_id];
+        let mut nonce = [0u8; HMAC_BYTES];
+        for (i, b) in nonce.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(13).wrapping_add(0x5a);
+        }
+        let ts_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        write_message(&mut wh2, &Message::AuthChallenge { nonce, ts_ms }).await?;
+        let resp = read_message(&mut rh, &mut dec).await?;
+        let Message::AuthChallengeResp { sig, ts_ms: resp_ts } = resp else {
+            write_message(
+                &mut wh2,
+                &Message::RegisterAck {
+                    ok: false,
+                    error: Some("HMAC 模式期望 AuthChallengeResp".into()),
+                    data_port: 0,
+                    listeners: vec![],
+                    applied_tunnels: vec![],
+                },
+            )
+            .await?;
+            anyhow::bail!("HMAC 模式收到非预期响应");
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let skew = if resp_ts > now { resp_ts - now } else { now - resp_ts };
+        if skew > 120_000 {
+            write_message(
+                &mut wh2,
+                &Message::RegisterAck {
+                    ok: false,
+                    error: Some("HMAC 挑战 ts 过期（>120s 偏差）".into()),
+                    data_port: 0,
+                    listeners: vec![],
+                    applied_tunnels: vec![],
+                },
+            )
+            .await?;
+            anyhow::bail!("HMAC ts 偏差过大: {skew}ms");
+        }
+        let expected = hmac::compute(&secret, &nonce, resp_ts);
+        if !hmac::constant_time_eq(&sig, &expected) {
+            write_message(
+                &mut wh2,
+                &Message::RegisterAck {
+                    ok: false,
+                    error: Some("HMAC 签名验证失败".into()),
+                    data_port: 0,
+                    listeners: vec![],
+                    applied_tunnels: vec![],
+                },
+            )
+            .await?;
+            anyhow::bail!("HMAC 签名错误");
+        }
+        // HMAC 已通过：使用占位 token 进入注册流程
+        let placeholder = format!("hmac:{}", device_id);
+        let token = placeholder;
+        // HMAC 已验证：标记 authenticated=true 跳过 legacy token 比对
+        hmac_already_passed = true;
+        // fall-through to 通用注册流程（HMAC 已被 gateway 接受）
+    }
+
     // 1. 认证并登记会话
     let (control_tx, control_rx) = mpsc::channel::<Message>(64);
     let session_tx = control_tx.clone();
+    let authenticated = !state.cfg.auth_hmac.contains_key(&device_id)
+        || hmac_already_passed;
     let reg = state.shared.lock().unwrap().registry.register(
         &device_id,
         &token,
         control_tx,
         device_info,
         Instant::now(),
+        authenticated,
     );
     let _replaced = match reg {
         Ok(r) => r,
         Err(RegisterError::BadToken) => {
             write_message(
-                &mut wh,
+                &mut wh2,
                 &Message::RegisterAck {
                     ok: false,
                     error: Some("认证失败：设备或令牌错误".into()),
@@ -333,7 +410,7 @@ async fn handle_control(stream: TcpStream, state: State) -> anyhow::Result<()> {
         Err(e) => {
             state.shared.lock().unwrap().registry.force_remove(&device_id);
             write_message(
-                &mut wh,
+                &mut wh2,
                 &Message::RegisterAck {
                     ok: false,
                     error: Some(format!("{e:#}")),
@@ -349,7 +426,7 @@ async fn handle_control(stream: TcpStream, state: State) -> anyhow::Result<()> {
 
     // 4. 应答（带生效配置全集与实际端口）
     write_message(
-        &mut wh,
+        &mut wh2,
         &Message::RegisterAck {
             ok: true,
             error: None,
@@ -371,7 +448,7 @@ async fn handle_control(stream: TcpStream, state: State) -> anyhow::Result<()> {
     let mut rx = control_rx;
     let writer = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if write_message(&mut wh, &msg).await.is_err() {
+            if write_message(&mut wh2, &msg).await.is_err() {
                 break;
             }
         }
@@ -413,7 +490,6 @@ async fn handle_control(stream: TcpStream, state: State) -> anyhow::Result<()> {
     read_result
 }
 
-/// 应用某设备的隧道全集：移除旧路由 → 绑定新监听 → 登记路由并记录运行时配置。
 /// 注册流程与控制台下发改动共用此入口。
 pub(crate) async fn apply_tunnels(
     state: &State,
