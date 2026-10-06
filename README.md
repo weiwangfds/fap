@@ -22,9 +22,10 @@ fap 的目标是「frp 的数据面 + 向日葵式的托管体验」：
 - [x] **M5c-1** 数据连接池预热（协议扩展 OpenStream/StreamConn `conn_id`）
 - [x] **M5c-2** agent 预连接池（RuntimeStatus.data_pool + 注册后建 4 条预热 data 连接）
 - [x] **M5c-3** 传输层抽象（`Transport` trait + `Plain` + `Yamux`/`Punch` 预留接入点）
-- [ ] **M5c-2 端到端**：gateway 主动 `OpenStream{conn_id>0}` prefetch 协议（`PoolReady`）+ 配对入池（已设计，下会话实施）
-- [ ] **M5c-3 真接**：数据连接套上 yamux session
-- [ ] **M5c-4** 直连打洞（STUN-like NAT 探测 + UDP 打洞 + 中继 fallback）
+- [x] **M5c-2 端到端** 数据连接池：首帧登记 + 激活指令（`OpenStream{conn_id>0}`）+ 网关/agent 双端池，e2e 验证
+- [x] **M5c-3 真接** yamux 0.14（driver 化会话 + tokio compat 桥，多流并发验证）
+- [x] **M5c-4 骨架** 直连打洞：候选收集（UDP connect 技巧）+ 探测包（`FAP!` magic）+ 竞速/回退决策
+- [ ] **M5c 收尾**：数据面从 `TcpStream` 泛型化到 `Box<dyn Transport>`（yamux 会话已就绪）；打洞候选交换（PunchOffer/Answer）与 UDP 竞速接线
 
 ## 快速上手（单二进制体验，向日葵式）
 
