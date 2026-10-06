@@ -227,9 +227,13 @@ pub async fn run_agent_session_with_status(
     // 3. 用户请求时网关发 OpenStream{stream_id>0, conn_id=k} 作为【激活指令】
     // 4. agent 收到激活指令：从池取 k 对应连接 → 拨内网目标 → 双向转发
     //    （省掉 OpenStream→agent 拨号 data 端口→StreamConn 的整段 RTT）
+    // 仅当携带 RuntimeStatus（有本地池）时才预热；无 status 的旧入口
+    // 不预热，网关池自然为空、走 M2 拨号路径（e2e 抓过：无池预热会产生
+    // 网关侧孤儿连接 → 用户命中后无人对接内网 → EOF）。
     let pool_status = status.clone();
     let pool_data_addr = data_addr;
-    tokio::spawn(async move {
+    if pool_status.is_some() {
+        tokio::spawn(async move {
         for k in 1u32..=4 {
             let mut s = match tokio::net::TcpStream::connect(pool_data_addr).await {
                 Ok(s) => s,
@@ -254,7 +258,8 @@ pub async fn run_agent_session_with_status(
         if let Some(st) = &pool_status {
             st.pool_mark_connected(4);
         }
-    });
+        });
+    }
 
     // 读循环：处理网关的开流请求与配置下发
     let read_result: anyhow::Result<()> = loop {

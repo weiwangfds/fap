@@ -7,6 +7,7 @@ use std::io;
 
 pub mod config;
 pub mod hmac;
+pub mod punch;
 pub mod transport;
 
 use serde::{Deserialize, Serialize};

@@ -9,16 +9,17 @@ fn message_json_uses_snake_case_type_tag() {
     let v = serde_json::to_value(&msg).unwrap();
     assert_eq!(v, json!({"type": "heartbeat", "timestamp_ms": 99}));
 
-    let msg = Message::StreamConn { stream_id: 3 };
+    let msg = Message::StreamConn { stream_id: 3, conn_id: 0 };
     let v = serde_json::to_value(&msg).unwrap();
-    assert_eq!(v, json!({"type": "stream_conn", "stream_id": 3}));
+    assert_eq!(v, json!({"type": "stream_conn", "stream_id": 3, "conn_id": 0}));
 
     let msg = Message::OpenStream {
         stream_id: 3,
         tunnel_id: "web".into(),
+        conn_id: 0,
     };
     let v = serde_json::to_value(&msg).unwrap();
-    assert_eq!(v, json!({"type": "open_stream", "stream_id": 3, "tunnel_id": "web"}));
+    assert_eq!(v, json!({"type": "open_stream", "stream_id": 3, "tunnel_id": "web", "conn_id": 0}));
 }
 
 #[test]

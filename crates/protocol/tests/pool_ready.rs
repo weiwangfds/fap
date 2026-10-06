@@ -36,6 +36,7 @@ fn gateway_can_issue_open_stream_with_pre_filled_conn_id() {
             tunnel_id: "web".into(),
             conn_id: id,
         };
-        assert_eq!(m.conn_id, id);
+        let Message::OpenStream { conn_id, .. } = m else { unreachable!() };
+        assert_eq!(conn_id, id);
     }
 }

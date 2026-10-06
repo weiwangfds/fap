@@ -109,7 +109,7 @@ fn decoder_buffers_partial_input() {
 #[test]
 fn decoder_handles_back_to_back_frames() {
     let a = encode(&Message::Heartbeat { timestamp_ms: 1 }).unwrap();
-    let b = encode(&Message::StreamConn { stream_id: 9 }).unwrap();
+    let b = encode(&Message::StreamConn { stream_id: 9, conn_id: 0 }).unwrap();
     let mut all = a.clone();
     all.extend_from_slice(&b);
     let mut dec = FrameDecoder::new();
@@ -197,6 +197,7 @@ async fn async_write_read_roundtrip_over_duplex() {
     let msg = Message::OpenStream {
         stream_id: 5,
         tunnel_id: "web".into(),
+        conn_id: 0,
     };
     write_message(&mut a, &msg).await.expect("写入成功");
 
@@ -209,7 +210,7 @@ async fn async_write_read_roundtrip_over_duplex() {
 #[tokio::test]
 async fn read_message_exact_leaves_no_pending_bytes() {
     let (mut a, mut b) = tokio::io::duplex(4096);
-    let msg = Message::StreamConn { stream_id: 7 };
+    let msg = Message::StreamConn { stream_id: 7, conn_id: 0 };
     write_message(&mut a, &msg).await.unwrap();
     // 紧跟一帧后追加原始字节（模拟 StreamConn 之后的裸流数据）
     a.write_all(&[0xDE, 0xAD]).await.unwrap();
