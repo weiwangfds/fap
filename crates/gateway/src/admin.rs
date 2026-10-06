@@ -8,12 +8,13 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, State};
 use axum::http::{header, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
 use tracing::warn;
@@ -33,7 +34,8 @@ pub(crate) async fn serve(
     token: Option<String>,
 ) -> anyhow::Result<()> {
     let st = Arc::new(AdminState { state, token });
-    let app = Router::new()
+    // 受保护路由组：全部需要 Bearer（主令牌或会话令牌）
+    let protected = Router::new()
         .route("/api/health", get(health))
         .route("/api/devices", get(devices))
         .route(
@@ -45,10 +47,53 @@ pub(crate) async fn serve(
             get(get_tunnel_metrics),
         )
         .route("/api/audit", get(audit))
-        .layer(middleware::from_fn_with_state(st.clone(), auth))
+        .layer(middleware::from_fn_with_state(st.clone(), auth));
+    // login 公开（内部自行校验主令牌）
+    let app = Router::new()
+        .route("/api/auth/login", post(login))
+        .merge(protected)
         .with_state(st);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// 登录：验证主令牌，签发短期会话令牌（M5b）。
+/// 会话令牌不由中间件直接签发——主令牌仍然有效（服务端部署场景）。
+async fn login(
+    State(st): State<Arc<AdminState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let Some(expected) = st.token.clone() else {
+        // 未启用鉴权的实例不签发会话
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "未启用鉴权"}))).into_response();
+    };
+    let provided = body.get("token").and_then(|v| v.as_str()).unwrap_or("");
+    if provided != expected {
+        st.state
+            .shared
+            .lock()
+            .unwrap()
+            .audit
+            .record("admin_login_fail", "admin", "主令牌错误");
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "令牌错误"}))).into_response();
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let ttl: u64 = body
+        .get("ttl_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(8 * 3600)
+        .min(24 * 3600);
+    let session = crate::admin_auth::issue_session(&expected, now, ttl * 1000);
+    st.state
+        .shared
+        .lock()
+        .unwrap()
+        .audit
+        .record("admin_login_ok", "admin", &format!("会话 {ttl}s"));
+    (StatusCode::OK, Json(json!({"session": session, "expires_in_secs": ttl}))).into_response()
 }
 
 async fn auth(
@@ -62,7 +107,16 @@ async fn auth(
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "));
-        if provided != Some(expected.as_str()) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let ok = match provided {
+            Some(p) if p == expected => true,
+            Some(p) => crate::admin_auth::verify_session(expected, p, now),
+            None => false,
+        };
+        if !ok {
             return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
         }
     }

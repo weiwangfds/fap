@@ -19,6 +19,18 @@ pub fn compute(secret: &[u8; HMAC_BYTES], nonce: &[u8; HMAC_BYTES], ts_ms: u64) 
     sig
 }
 
+/// 用字符串 key 对任意域分隔消息计算 HMAC-SHA256（如 admin 会话令牌签名）。
+pub fn compute_str_key(key: &str, parts: &[&[u8]]) -> [u8; HMAC_BYTES] {
+    let mut mac = HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC-SHA256 接受任意 key");
+    for p in parts {
+        mac.update(p);
+    }
+    let out = mac.finalize().into_bytes();
+    let mut sig = [0u8; HMAC_BYTES];
+    sig.copy_from_slice(&out);
+    sig
+}
+
 /// 常量时间比较（防侧信道）。
 pub fn constant_time_eq(a: &[u8; HMAC_BYTES], b: &[u8; HMAC_BYTES]) -> bool {
     let mut diff: u8 = 0;
