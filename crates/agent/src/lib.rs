@@ -1,5 +1,8 @@
 //! fap 客户端核心：注册会话、心跳、开流处理、重连。
 
+pub mod local_ui;
+pub mod runtime;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -99,7 +102,11 @@ pub fn parse_tunnel_spec(spec: &str) -> Result<TunnelConfig, SpecError> {    let
 }
 
 /// 运行一次完整会话：连接 → 注册 → 心跳 → 处理开流，直到控制连接结束。
-pub async fn run_agent_session(cfg: AgentConfig) -> anyhow::Result<()> {
+/// `status` 供本地管理页读取（可传 None 不收集）。
+pub async fn run_agent_session_with_status(
+    cfg: AgentConfig,
+    status: Option<Arc<runtime::RuntimeStatus>>,
+) -> anyhow::Result<()> {
     use anyhow::Context as _;
     use fap_protocol::{read_message, write_message, FrameDecoder, Message};
     use tokio::net::TcpStream;
@@ -109,7 +116,10 @@ pub async fn run_agent_session(cfg: AgentConfig) -> anyhow::Result<()> {
     let mut stream = match connect {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
-            return Err(anyhow::Error::new(e).context(format!("连接网关 {} 失败", cfg.server_addr)))
+            if let Some(st) = &status {
+                st.set_last_error(format!("连接网关失败: {e}"));
+            }
+            return Err(anyhow::Error::new(e).context(format!("连接网关 {} 失败", cfg.server_addr)));
         }
         Err(_) => anyhow::bail!("连接网关 {} 超时", cfg.server_addr),
     };
@@ -144,7 +154,15 @@ pub async fn run_agent_session(cfg: AgentConfig) -> anyhow::Result<()> {
         anyhow::bail!("期望 RegisterAck，实际 {ack:?}");
     };
     if !ok {
+        if let Some(st) = &status {
+            st.set_last_error(format!("注册被拒绝: {}", error.clone().unwrap_or_default()));
+        }
         anyhow::bail!("注册被拒绝: {}", error.unwrap_or_default());
+    }
+    if let Some(st) = &status {
+        st.set_registered(true);
+        st.set_tunnels(cfg.tunnels.clone());
+        st.set_last_error_clear();
     }
 
     let server: std::net::SocketAddr = cfg
@@ -213,14 +231,24 @@ pub async fn run_agent_session(cfg: AgentConfig) -> anyhow::Result<()> {
                     continue;
                 };
                 let da = data_addr;
+                let st = status.clone();
                 tokio::spawn(async move {
+                    if let Some(st) = &st {
+                        st.stream_opened();
+                    }
                     handle_stream(stream_id, da, target).await;
+                    if let Some(st) = &st {
+                        st.stream_closed();
+                    }
                 });
             }
             Ok(Message::ConfigPush {
                 revision,
                 tunnels: new_tunnels,
             }) => {
+                if let Some(st) = &status {
+                    st.set_tunnels(new_tunnels.clone());
+                }
                 *tunnels.write().unwrap() = new_tunnels
                     .iter()
                     .map(|t| (t.tunnel_id.clone(), t.clone()))
@@ -241,13 +269,24 @@ pub async fn run_agent_session(cfg: AgentConfig) -> anyhow::Result<()> {
                     .await;
             }
             Ok(_) => {}
-            Err(e) => break Err(anyhow::Error::new(e).context("控制连接结束")),
+            Err(e) => {
+                if let Some(st) = &status {
+                    st.set_last_error(format!("控制连接结束: {e}"));
+                    st.set_registered(false);
+                }
+                break Err(anyhow::Error::new(e).context("控制连接结束"));
+            }
         }
     };
 
     hb.abort();
     writer.abort();
     read_result
+}
+
+/// 兼容入口：不收集运行时状态的会话。
+pub async fn run_agent_session(cfg: AgentConfig) -> anyhow::Result<()> {
+    run_agent_session_with_status(cfg, None).await
 }
 
 /// 为一条用户流建立数据连接：回连网关 → 声明流 ID → 与内网真实服务对接。
@@ -290,11 +329,14 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// 常驻运行：会话断开后按指数退避重连。
-pub async fn run_agent(cfg: AgentConfig) -> anyhow::Result<()> {
+/// 常驻运行：会话断开后按指数退避重连。`status` 供本地管理页读取。
+pub async fn run_agent_with_status(
+    cfg: AgentConfig,
+    status: Option<Arc<runtime::RuntimeStatus>>,
+) -> anyhow::Result<()> {
     let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
     loop {
-        match run_agent_session(cfg.clone()).await {
+        match run_agent_session_with_status(cfg.clone(), status.clone()).await {
             Ok(()) => tracing::info!("会话正常结束，准备重连"),
             Err(e) => tracing::warn!("会话结束: {e:#}"),
         }
@@ -302,6 +344,11 @@ pub async fn run_agent(cfg: AgentConfig) -> anyhow::Result<()> {
         tracing::info!("{wait:?} 后重连");
         tokio::time::sleep(wait).await;
     }
+}
+
+/// 兼容入口：不收集运行时状态的常驻运行。
+pub async fn run_agent(cfg: AgentConfig) -> anyhow::Result<()> {
+    run_agent_with_status(cfg, None).await
 }
 
 #[cfg(test)]

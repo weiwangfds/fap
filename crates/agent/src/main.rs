@@ -1,9 +1,10 @@
 //! fap-agent：客户端命令行入口。
 
 use std::time::Duration;
-
 use clap::Parser;
-use fap_agent::{parse_tunnel_spec, run_agent, AgentConfig};
+use fap_agent::runtime::RuntimeStatus;
+use fap_agent::{local_ui, parse_tunnel_spec, run_agent_with_status, AgentConfig};
+use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -37,6 +38,10 @@ struct Cli {
     /// 登录用户名（控制台展示用）
     #[arg(long, default_value = "")]
     user: String,
+
+    /// 本地管理页监听地址（仅回环！例如 127.0.0.1:7800；不传则不启用）
+    #[arg(long)]
+    local_ui: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -107,8 +112,25 @@ fn main() -> anyhow::Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
+        let status = Arc::new(RuntimeStatus::new(
+            &cfg.device_id,
+            &cfg.server_addr,
+        ));
+        // 本地管理页（仅回环地址使用）
+        if let Some(ui_addr) = cli.local_ui {
+            if !ui_addr.starts_with("127.0.0.1") && !ui_addr.starts_with("[::1]") {
+                anyhow::bail!("--local-ui 只允许绑定回环地址（当前: {ui_addr}）");
+            }
+            let addr: std::net::SocketAddr = ui_addr.parse()?;
+            let st = status.clone();
+            tokio::spawn(async move {
+                if let Err(e) = local_ui::serve(st, addr).await {
+                    tracing::warn!("本地管理页退出: {e:#}");
+                }
+            });
+        }
         tokio::select! {
-            result = run_agent(cfg) => result?,
+            result = run_agent_with_status(cfg, Some(status)) => result?,
             _ = tokio::signal::ctrl_c() => tracing::info!("收到 Ctrl+C，客户端退出"),
         }
         Ok::<(), anyhow::Error>(())

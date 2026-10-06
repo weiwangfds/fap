@@ -105,9 +105,6 @@ pub(crate) struct State {
 }
 
 impl State {
-    pub(crate) fn data_port(&self) -> u16 {
-        self.data_port
-    }
     pub(crate) fn next_stream_id(&self) -> u64 {
         self.seq.fetch_add(1, Ordering::Relaxed)
     }
@@ -371,7 +368,7 @@ async fn handle_control(stream: TcpStream, state: State) -> anyhow::Result<()> {
         }
         // HMAC 已通过：使用占位 token 进入注册流程
         let placeholder = format!("hmac:{}", device_id);
-        let token = placeholder;
+        let _token = placeholder;
         // HMAC 已验证：标记 authenticated=true 跳过 legacy token 比对
         hmac_already_passed = true;
         // fall-through to 通用注册流程（HMAC 已被 gateway 接受）
@@ -639,7 +636,7 @@ async fn tunnel_accept_loop(listener: TcpListener, port: u16, state: State) {
     }
 }
 
-pub(crate) async fn handle_user(mut user: TcpStream, port: u16, state: State) {
+pub(crate) async fn handle_user(user: TcpStream, port: u16, state: State) {
     let Some(target) = state.shared.lock().unwrap().router.route(port) else {
         return;
     };
