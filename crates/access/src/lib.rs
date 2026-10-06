@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use fap_protocol::{read_message_exact, write_message, Message};
+use fap_protocol::{write_message, Message};
 use tokio::io::copy_bidirectional;
 use tokio::net::{TcpListener, TcpStream};
 

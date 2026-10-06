@@ -67,16 +67,9 @@ pub struct MetricsSnapshot {
     pub last_error: Option<String>,
 }
 
+#[derive(Default)]
 pub struct MetricsRegistry {
     by_tunnel: HashMap<(String, String), TunnelMetrics>,
-}
-
-impl Default for MetricsRegistry {
-    fn default() -> Self {
-        Self {
-            by_tunnel: HashMap::new(),
-        }
-    }
 }
 
 impl MetricsRegistry {

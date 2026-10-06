@@ -44,7 +44,7 @@ impl RuntimeStatus {
     }
 
     /// M5c-2：按 OpenStream 中的 conn_id 取一条池连接（缺则返回 None）。
-    pub fn pool_take_by_id(&self, conn_id: u32) -> Option<TcpStream> {
+    pub fn pool_take_by_id(&self, _conn_id: u32) -> Option<TcpStream> {
         let mut q = self.data_pool.lock().unwrap();
         if q.is_empty() {
             return None;

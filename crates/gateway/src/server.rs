@@ -344,7 +344,7 @@ async fn handle_control(stream: TcpStream, state: State) -> anyhow::Result<()> {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        let skew = if resp_ts > now { resp_ts - now } else { now - resp_ts };
+        let skew = resp_ts.abs_diff(now);
         if skew > 120_000 {
             write_message(
                 &mut wh2,
@@ -817,7 +817,7 @@ async fn data_accept_loop(listener: TcpListener, state: State) -> anyhow::Result
                         // 所以这里我们按 device + 最近一次占位 OpenStream 的 tunnel
                         // 入池。但占位 OpenStream 不带 tunnel_id 概念——v1 简化：agent
                         // 把预热连接均匀分配给所有隧道；这里入池时随机选一台设备的某个隧道。
-                        let mut shared = st.shared.lock().unwrap();
+                        let shared = st.shared.lock().unwrap();
                         let device_ids: Vec<String> = shared.runtime.keys().cloned().collect();
                         drop(shared);
                         let (dev, tun) = device_ids

@@ -43,19 +43,19 @@ async fn handle_conn(conn: &mut TcpStream, peer: SocketAddr, state: &State) -> a
             &parse_sni(buf).unwrap_or_default(),
         );
         if let Some(target) = target {
-            return forward_to_agent(conn, &state, target, &buf[..n]).await;
+            return forward_to_agent(conn, state, target, &buf[..n]).await;
         }
         return tls_passthrough_no_route(conn).await;
     }
 
     if is_http_method_start(buf) {
-        return route_http(conn, &state, buf).await;
+        return route_http(conn, state, buf).await;
     }
 
     if buf[0] == 0x00 {
         // 访问器协议：首帧 AccessRequest（帧长度高字节为 0x00）。
         // 注意 peek 不消费 —— 用 read_message_exact 从 socket 精确读帧。
-        return handle_access(conn, &state).await;
+        return handle_access(conn, state).await;
     }
 
     // 其它：直接关闭
@@ -167,7 +167,7 @@ async fn route_http(conn: &mut TcpStream, state: &State, _peek: &[u8]) -> anyhow
     // 命中控制台
     if let Some(console_host) = state.cfg.console_host.as_deref() {
         if !console_host.is_empty() && host_matches(&head.host, console_host) {
-            return reverse_proxy_console(conn, &state, &head, &buf, body_so_far).await;
+            return reverse_proxy_console(conn, state, &head, &buf, body_so_far).await;
         }
     }
     // 命中 host/path 路由
@@ -180,7 +180,7 @@ async fn route_http(conn: &mut TcpStream, state: &State, _peek: &[u8]) -> anyhow
     if let Some(target) = route {
         // ACL：来源 IP 校验
         let peer = conn.peer_addr()?;
-        if !acl_allows(&state, &target, peer) {
+        if !acl_allows(state, &target, peer) {
             state
                 .shared
                 .lock()
@@ -191,7 +191,7 @@ async fn route_http(conn: &mut TcpStream, state: &State, _peek: &[u8]) -> anyhow
             return Ok(());
         }
         // 反向代理：把请求（清理 hop-by-hop 后）发给 agent
-        return reverse_proxy_to_agent(conn, &state, target, &head, &buf, body_so_far).await;
+        return reverse_proxy_to_agent(conn, state, target, &head, &buf, body_so_far).await;
     }
     not_found(conn).await.ok();
     Ok(())
@@ -306,7 +306,7 @@ async fn reverse_proxy_to_agent(
         return Ok(());
     }
     let _ = tokio::io::copy_bidirectional(conn, &mut agent).await;
-    let _ = state
+    state
         .shared
         .lock()
         .unwrap()
@@ -404,7 +404,7 @@ async fn relay_via_agent(
         .control_tx(&device_id);
     let Some(control) = control else {
         conn.shutdown().await.ok();
-        let _ = state
+        state
             .shared
             .lock()
             .unwrap()
@@ -425,7 +425,7 @@ async fn relay_via_agent(
         .is_err()
     {
         state.shared.lock().unwrap().matcher.cancel(stream_id);
-        let _ = state
+        state
             .shared
             .lock()
             .unwrap()
@@ -438,7 +438,7 @@ async fn relay_via_agent(
         Ok(Ok(s)) => s,
         _ => {
             state.shared.lock().unwrap().matcher.cancel(stream_id);
-            let _ = state
+            state
                 .shared
                 .lock()
                 .unwrap()
@@ -454,7 +454,7 @@ async fn relay_via_agent(
         }
     }
     let _ = tokio::io::copy_bidirectional(conn, &mut agent).await;
-    let _ = state
+    state
         .shared
         .lock()
         .unwrap()

@@ -21,8 +21,12 @@ use tokio::net::TcpStream;
 /// 节省 OpenStream→拨号→StreamConn 的 ~5 RTT 用户态延迟。
 ///
 /// 池按 (device_id, tunnel_id) 维度隔离；空池时取 None → 回退拨号路径。
+/// 池内条目：(conn_id, 预热连接)。
+pub type PoolEntry = (u32, TcpStream);
+type TunnelQueue = VecDeque<PoolEntry>;
+
 pub struct DataConnPool {
-    by_tunnel: Mutex<HashMap<(String, String), VecDeque<(u32, TcpStream)>>>,
+    by_tunnel: Mutex<HashMap<(String, String), TunnelQueue>>,
 }
 
 impl Default for DataConnPool {
