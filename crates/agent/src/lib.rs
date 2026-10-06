@@ -224,6 +224,7 @@ pub async fn run_agent_session_with_status(
             Ok(Message::OpenStream {
                 stream_id,
                 tunnel_id,
+                conn_id,
             }) => {
                 let target = tunnels.read().unwrap().get(&tunnel_id).cloned();
                 let Some(target) = target else {
@@ -236,7 +237,7 @@ pub async fn run_agent_session_with_status(
                     if let Some(st) = &st {
                         st.stream_opened();
                     }
-                    handle_stream(stream_id, da, target).await;
+                    handle_stream(stream_id, da, target, conn_id).await;
                     if let Some(st) = &st {
                         st.stream_closed();
                     }
@@ -290,8 +291,23 @@ pub async fn run_agent_session(cfg: AgentConfig) -> anyhow::Result<()> {
 }
 
 /// 为一条用户流建立数据连接：回连网关 → 声明流 ID → 与内网真实服务对接。
-async fn handle_stream(stream_id: u64, data_addr: std::net::SocketAddr, target: TunnelConfig) {
+/// `conn_id = 0` 走原路径（拨号新数据连接）；M5c-2 agent 预连接池启用后，
+/// agent 从空闲池中按 conn_id 取连接，不发起新拨号。
+async fn handle_stream(
+    stream_id: u64,
+    data_addr: std::net::SocketAddr,
+    target: TunnelConfig,
+    conn_id: u32,
+) {
     use fap_protocol::{write_message, Message};
+
+    if conn_id != 0 {
+        // M5c-2 启用后由此处从池中按 id 取连接；目前未启用，直接报错忽略。
+        tracing::warn!(
+            "OpenStream 携带 conn_id={conn_id} 但 agent 预连接池未启用（M5c-2 待启用）"
+        );
+        return;
+    }
 
     let mut data = match tokio::net::TcpStream::connect(data_addr).await {
         Ok(s) => s,
@@ -300,9 +316,15 @@ async fn handle_stream(stream_id: u64, data_addr: std::net::SocketAddr, target: 
             return;
         }
     };
-    if write_message(&mut data, &Message::StreamConn { stream_id })
-        .await
-        .is_err()
+    if write_message(
+        &mut data,
+        &Message::StreamConn {
+            stream_id,
+            conn_id: 0,
+        },
+    )
+    .await
+    .is_err()
     {
         return;
     }

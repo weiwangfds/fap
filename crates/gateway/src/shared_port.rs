@@ -245,6 +245,7 @@ async fn reverse_proxy_to_agent(
         .send(fap_protocol::Message::OpenStream {
             stream_id,
             tunnel_id: tunnel_id.clone(),
+            conn_id: 0,
         })
         .await
         .is_err()
@@ -418,6 +419,7 @@ async fn relay_via_agent(
         .send(fap_protocol::Message::OpenStream {
             stream_id,
             tunnel_id: tunnel_id.clone(),
+            conn_id: 0,
         })
         .await
         .is_err()

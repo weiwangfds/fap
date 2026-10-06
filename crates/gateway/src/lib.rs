@@ -3,6 +3,7 @@ pub mod acl;
 pub mod admin;
 pub mod admin_auth;
 pub mod audit;
+pub mod data_pool;
 pub mod metrics;
 pub mod protocol_http;
 pub mod protocol_tls;

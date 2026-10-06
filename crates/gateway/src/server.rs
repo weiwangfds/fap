@@ -687,6 +687,7 @@ pub(crate) async fn open_stream_to_device(
         .send(Message::OpenStream {
             stream_id,
             tunnel_id: target.tunnel_id.clone(),
+            conn_id: 0, // M5c-1：M2 路径 = agent 在收到后拨号
         })
         .await
         .is_err()
@@ -766,7 +767,7 @@ async fn data_accept_loop(listener: TcpListener, state: State) -> anyhow::Result
         tokio::spawn(async move {
             let mut s = stream;
             match read_message_exact(&mut s).await {
-                Ok(Message::StreamConn { stream_id }) => {
+                Ok(Message::StreamConn { stream_id, conn_id: _ }) => {
                     if !st.shared.lock().unwrap().matcher.complete(stream_id, s) {
                         debug!("数据连接 {peer} 的流 {stream_id} 无等待者，关闭");
                     }

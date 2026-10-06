@@ -126,13 +126,20 @@ pub enum Message {
         timestamp_ms: u64,
     },
     /// 网关 → agent：有用户访问，请为该流建立数据连接。
+    /// `conn_id = 0` 表示 agent 在 OpenStream 后才拨号（旧行为，向后兼容）；
+    /// `conn_id > 0` 表示 agent 从预热池中取该索引的空闲连接，**不再拨号**。
     OpenStream {
         stream_id: u64,
         tunnel_id: String,
+        #[serde(default)]
+        conn_id: u32,
     },
     /// agent → 网关（数据连接上的首帧）：本连接承载哪个流，其后转为裸字节流。
+    /// `conn_id` 为 OpenStream 中携带的同一值（0 = agent 拨号的新连接）。
     StreamConn {
         stream_id: u64,
+        #[serde(default)]
+        conn_id: u32,
     },
     /// 网关 → agent：控制台下发了新的隧道全集，请更新本地路由表。
     ConfigPush {
