@@ -26,6 +26,18 @@ struct Cli {
     #[arg(long = "auth", value_name = "DEVICE:TOKEN")]
     auth: Vec<String>,
 
+    /// 共享单端口监听地址（HTTP Host/Path + SNI + 访问器），启用单端口承诺
+    #[arg(long)]
+    shared_addr: Option<String>,
+
+    /// admin API 监听地址（控制台后端）
+    #[arg(long)]
+    admin_addr: Option<String>,
+
+    /// admin API Bearer 令牌（控制台登录用）
+    #[arg(long)]
+    admin_token: Option<String>,
+
     /// 心跳超时（秒）
     #[arg(long, default_value_t = 30)]
     heartbeat_timeout_secs: u64,
@@ -51,6 +63,7 @@ fn toml_to_config(t: fap_protocol::config::GatewayToml) -> anyhow::Result<Gatewa
         admin_addr: t.admin_addr.map(|s| s.parse()).transpose()?,
         admin_token: t.admin_token,
         store_file: t.store_file.map(std::path::PathBuf::from),
+        audit_file: t.audit_file.map(std::path::PathBuf::from),
         console_backend: t.console_backend.map(|s| s.parse()).transpose()?,
         console_host: t.console_host,
         auth: t.auth,
@@ -97,6 +110,9 @@ fn main() -> anyhow::Result<()> {
             GatewayConfig {
                 control_addr: cli.control_addr.parse()?,
                 data_addr: cli.data_addr.parse()?,
+                shared_addr: cli.shared_addr.map(|s| s.parse()).transpose()?,
+                admin_addr: cli.admin_addr.map(|s| s.parse()).transpose()?,
+                admin_token: cli.admin_token,
                 auth,
                 heartbeat_timeout: Duration::from_secs(cli.heartbeat_timeout_secs),
                 stream_setup_timeout: Duration::from_secs(cli.stream_setup_timeout_secs),

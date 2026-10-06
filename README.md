@@ -15,10 +15,24 @@ fap 的目标是「frp 的数据面 + 向日葵式的托管体验」：
 - [x] **M2.5** 设备元信息上报 / 每隧道流量指标 / HMAC-SHA256 挑战认证 / 注册节流
 - [x] **M3** 单端口承诺：HTTP Host/Path + SNI 直通 + 控制台反代 + TOML 配置
 - [x] **M4** 访问器协议（AccessRequest → 裸管道）+ `fap-access` 本地转发工具
+- [x] **M4c** agent 内嵌本地管理页（rust-embed + `--local-ui 127.0.0.1:7800`）
 - [x] **M5a** 审计日志 + ACL（`allowed_ips` CIDR）+ fail2ban 式节流
-- [ ] **M4c** agent 本地管理页嵌入（Next.js 静态导出 + rust-embed）
-- [ ] **M5b/c** admin 多用户鉴权 / yamux 多路复用 / 直连打洞
-- [ ] **M6** Next.js + Tailwind v4 + shadcn 控制台
+- [x] **M5b** admin 签名会话令牌（`POST /api/auth/login` 换短期会话，主令牌不落浏览器）
+- [x] **M6** Next.js + Tailwind v4 + shadcn 控制台（静态导出，登录/设备/隧道编辑/指标/审计）
+- [ ] **M5c** yamux 多路复用（StreamConn 首帧声明流 ID 的设计已是复用前置，接入点见 `DESIGN.md`）/ 数据连接池预热 / 直连打洞
+
+## 快速上手（单二进制体验，向日葵式）
+
+```bash
+# 1. 构建控制台静态页（一次）
+cd apps/console-web && npm install && npm run build && cd ../..
+
+# 2. 网关（公网机器）+ 客户端（内网机器，带本地管理页）
+cargo run -p fap-gateway -- --auth dev1:secret --shared-addr 0.0.0.0:443
+cargo run -p fap-agent -- --device-id dev1 --token secret \
+    --tunnel web:0:127.0.0.1:8080 --local-ui 127.0.0.1:7800
+# 打开 http://127.0.0.1:7800 —— 本机状态 + 内嵌控制台
+```
 
 ## 安全模型
 
