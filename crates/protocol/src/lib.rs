@@ -30,6 +30,7 @@ pub const MSG_CONFIG_ACK: u8 = 8;
 pub const MSG_ACCESS_REQUEST: u8 = 9;
 pub const MSG_AUTH_CHALLENGE: u8 = 10;
 pub const MSG_AUTH_CHALLENGE_RESP: u8 = 11;
+pub const MSG_POOL_READY: u8 = 14;
 /// HMAC 摘要长度（SHA-256 = 32 字节）。
 pub const HMAC_BYTES: usize = 32;
 
@@ -142,6 +143,12 @@ pub enum Message {
         #[serde(default)]
         conn_id: u32,
     },
+    /// M5c-2：agent → 网关，告知「我已预热 N 条数据连接」。
+    /// 网关据此发 N 条 OpenStream{conn_id=1..=N, stream_id=0} 占位；
+    /// agent 在每条预热连接上写 StreamConn{conn_id}；网关配对后入空闲池。
+    PoolReady {
+        count: u32,
+    },
     /// 网关 → agent：控制台下发了新的隧道全集，请更新本地路由表。
     ConfigPush {
         revision: u64,
@@ -185,6 +192,7 @@ impl Message {
             Message::AccessRequest { .. } => MSG_ACCESS_REQUEST,
             Message::AuthChallenge { .. } => MSG_AUTH_CHALLENGE,
             Message::AuthChallengeResp { .. } => MSG_AUTH_CHALLENGE_RESP,
+            Message::PoolReady { .. } => MSG_POOL_READY,
         }
     }
 
@@ -202,6 +210,7 @@ impl Message {
             MSG_ACCESS_REQUEST => "access_request",
             MSG_AUTH_CHALLENGE => "auth_challenge",
             MSG_AUTH_CHALLENGE_RESP => "auth_challenge_resp",
+            MSG_POOL_READY => "pool_ready",
             _ => return None,
         })
     }

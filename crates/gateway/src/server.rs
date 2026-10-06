@@ -88,6 +88,8 @@ pub(crate) struct Shared {
     pub(crate) throttle: crate::throttle::Throttle,
     /// 审计日志（M5a）。
     pub(crate) audit: crate::audit::AuditLog,
+    /// M5c-2 端到端：数据连接池（按 (device, tunnel) 隔离）。
+    pub(crate) data_pool: crate::data_pool::DataConnPool,
 }
 
 #[derive(Clone)]
@@ -160,6 +162,7 @@ impl Gateway {
                     1024,
                     cfg.audit_file.as_ref().map(std::path::PathBuf::from),
                 ),
+                data_pool: crate::data_pool::DataConnPool::new(),
             })),
             seq: Arc::new(AtomicU64::new(1)),
             revision: Arc::new(AtomicU64::new(1)),
@@ -263,6 +266,11 @@ impl Gateway {
             .unwrap()
             .metrics
             .snapshot(device_id, tunnel_id)
+    }
+
+    /// 数据连接池当前总空闲数（跨所有隧道）。
+    pub fn data_pool_total(&self) -> usize {
+        self.state.shared.lock().unwrap().data_pool.total()
     }
 
     /// 停止网关主任务。
@@ -515,6 +523,11 @@ async fn handle_control(stream: TcpStream, state: State) -> anyhow::Result<()> {
             Ok(Message::ConfigAck { ok, revision, .. }) => {
                 debug!("设备 {device_id} 配置应用应答 ok={ok} rev={revision}");
             }
+            Ok(Message::PoolReady { count }) => {
+                // M5c-2：agent 旧版宣告（现在预热连接由首帧直接登记，不再需要
+                // 网关回发占位 OpenStream）。保留兼容处理：仅日志。
+                debug!("设备 {device_id} 宣告预热 {count} 条数据连接（首帧登记模式）");
+            }
             Ok(_) => {}
             Err(e) => break Err(anyhow::Error::new(e).context("控制连接读取失败")),
         }
@@ -636,7 +649,7 @@ async fn tunnel_accept_loop(listener: TcpListener, port: u16, state: State) {
     }
 }
 
-pub(crate) async fn handle_user(user: TcpStream, port: u16, state: State) {
+pub(crate) async fn handle_user(mut user: TcpStream, port: u16, state: State) {
     let Some(target) = state.shared.lock().unwrap().router.route(port) else {
         return;
     };
@@ -659,6 +672,33 @@ pub(crate) async fn handle_user(user: TcpStream, port: u16, state: State) {
         .metrics
         .get_or_create(&target.device_id, &target.tunnel_id)
         .open_stream();
+    // M5c-2 端到端：优先从池取预热连接 + 发激活指令，然后直接双向转发。
+    // 注意：MutexGuard 不是 Send，锁必须在 await 前 drop（先取值出作用域）。
+    let prewarmed = state
+        .shared
+        .lock()
+        .unwrap()
+        .data_pool
+        .take(&target.device_id, &target.tunnel_id);
+    if let Some((conn_id, mut agent)) = prewarmed {
+        // 激活指令：通知 agent 用池中 conn_id 对应连接对接内网目标
+        let _ = control
+            .send(Message::OpenStream {
+                stream_id,
+                tunnel_id: target.tunnel_id.clone(),
+                conn_id,
+            })
+            .await;
+        let _ = tokio::io::copy_bidirectional(&mut user, &mut agent).await;
+        state
+            .shared
+            .lock()
+            .unwrap()
+            .metrics
+            .get_or_create(&target.device_id, &target.tunnel_id)
+            .close_stream();
+        return;
+    }
     open_stream_to_device(&state, &control, &target, stream_id, user).await;
     // 收尾：close_stream（无论成功/失败/超时都计数归零）
     state
@@ -767,7 +807,36 @@ async fn data_accept_loop(listener: TcpListener, state: State) -> anyhow::Result
         tokio::spawn(async move {
             let mut s = stream;
             match read_message_exact(&mut s).await {
-                Ok(Message::StreamConn { stream_id, conn_id: _ }) => {
+                Ok(Message::StreamConn { stream_id, conn_id }) => {
+                    if stream_id == 0 && conn_id > 0 {
+                        // M5c-2 端到端：预热连接配对。
+                        // stream_id=0 = 这是 agent 对占位 OpenStream 的回复；
+                        // conn_id=k = 预热池中的第 k 条。
+                        // 当前所有隧道共用一个池（agent 端隧道路由在
+                        // handle_stream 里根据 tunnel_id 选内网目标）。
+                        // 所以这里我们按 device + 最近一次占位 OpenStream 的 tunnel
+                        // 入池。但占位 OpenStream 不带 tunnel_id 概念——v1 简化：agent
+                        // 把预热连接均匀分配给所有隧道；这里入池时随机选一台设备的某个隧道。
+                        let mut shared = st.shared.lock().unwrap();
+                        let device_ids: Vec<String> = shared.runtime.keys().cloned().collect();
+                        drop(shared);
+                        let (dev, tun) = device_ids
+                            .into_iter()
+                            .find_map(|d| {
+                                let shared = st.shared.lock().unwrap();
+                                shared.runtime.get(&d).and_then(|tunnels| {
+                                    tunnels.first().map(|t| (d.clone(), t.tunnel_id.clone()))
+                                })
+                            })
+                            .unwrap_or_else(|| ("unknown".into(), "unknown".into()));
+                        st.shared
+                            .lock()
+                            .unwrap()
+                            .data_pool
+                            .put(&dev, &tun, conn_id, s);
+                        debug!("预热连接 {peer} -> ({dev}/{tun}) conn_id={conn_id}");
+                        return;
+                    }
                     if !st.shared.lock().unwrap().matcher.complete(stream_id, s) {
                         debug!("数据连接 {peer} 的流 {stream_id} 无等待者，关闭");
                     }

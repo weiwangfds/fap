@@ -171,25 +171,7 @@ pub async fn run_agent_session_with_status(
         .context("server_addr 不是合法的 host:port")?;
     let data_addr = std::net::SocketAddr::new(server.ip(), data_port);
 
-    // M5c-2：预热数据连接池 —— 注册成功后立即建 N 条空闲 data 连接，
-    // 每条只写一帧 StreamConn(stream_id=0) 占位（或静默等待）让网关侧持有 TcpStream。
-    // 注：StreamConn 首帧带 stream_id=0 在网关 matcher.complete() 处无等待者，会被关闭。
-    // 更稳的做法：agent 等 OpenStream 来时再写；空闲时连接不写首帧也不读——直接挂到池里。
-    // 见 handle_stream 的 conn_id > 0 分支。
-    let data_port_for_pool = data_addr;
-    let pool_st = status.clone();
-    tokio::spawn(async move {
-        for _ in 0..4 {
-            match tokio::net::TcpStream::connect(data_port_for_pool).await {
-                Ok(s) => {
-                    if let Some(st) = &pool_st {
-                        st.pool_push(s);
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
+    // M5c-2 端到端：预热数据连接池 —— 占位，移到 (tx, status) 之后
 
     // 本会话的隧道表：RegisterAck.applied_tunnels 与 ConfigPush 都会整体替换它
     let tunnels = {
@@ -238,6 +220,42 @@ pub async fn run_agent_session_with_status(
         }
     });
 
+    // M5c-2 端到端：预热数据连接池（「首帧即登记，激活即取用」）
+    // 1. 主动建 N 条 data 连接；每条先写首帧 StreamConn{stream_id=0, conn_id=k}，
+    //    然后【保留连接】入 agent 池（TCP 全双工，首帧之后连接仍可承载业务）
+    // 2. 网关 accept 该连接、读首帧 → 登记入网关池（带 k）
+    // 3. 用户请求时网关发 OpenStream{stream_id>0, conn_id=k} 作为【激活指令】
+    // 4. agent 收到激活指令：从池取 k 对应连接 → 拨内网目标 → 双向转发
+    //    （省掉 OpenStream→agent 拨号 data 端口→StreamConn 的整段 RTT）
+    let pool_status = status.clone();
+    let pool_data_addr = data_addr;
+    tokio::spawn(async move {
+        for k in 1u32..=4 {
+            let mut s = match tokio::net::TcpStream::connect(pool_data_addr).await {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            if write_message(
+                &mut s,
+                &Message::StreamConn {
+                    stream_id: 0,
+                    conn_id: k,
+                },
+            )
+            .await
+            .is_err()
+            {
+                break;
+            }
+            if let Some(st) = &pool_status {
+                st.pool_push(s);
+            }
+        }
+        if let Some(st) = &pool_status {
+            st.pool_mark_connected(4);
+        }
+    });
+
     // 读循环：处理网关的开流请求与配置下发
     let read_result: anyhow::Result<()> = loop {
         match read_message(&mut rh, &mut dec).await {
@@ -246,6 +264,46 @@ pub async fn run_agent_session_with_status(
                 tunnel_id,
                 conn_id,
             }) => {
+                // M5c-2 激活指令：stream_id > 0 && conn_id > 0
+                // 网关已把预热连接对接到用户，要求 agent 用池中该连接对接内网目标。
+                if stream_id > 0 && conn_id > 0 {
+                    let target = tunnels.read().unwrap().get(&tunnel_id).cloned();
+                    let st = status.clone();
+                    let Some(target) = target else {
+                        tracing::warn!("激活指令的隧道 {tunnel_id} 未知，忽略");
+                        continue;
+                    };
+                    tokio::spawn(async move {
+                        let Some(st) = &st else { return };
+                        st.stream_opened();
+                        let Some(mut data) = st.pool_take_by_id(conn_id) else {
+                            tracing::warn!("激活 conn_id={conn_id} 但池为空");
+                            st.stream_closed();
+                            return;
+                        };
+                        // 连接的另一端已是用户（网关直连 copy），只需对接内网
+                        let mut local = match tokio::net::TcpStream::connect((
+                            target.target_host.as_str(),
+                            target.target_port,
+                        ))
+                        .await
+                        {
+                            Ok(s) => s,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "连接内网 {}:{} 失败: {e}",
+                                    target.target_host,
+                                    target.target_port
+                                );
+                                st.stream_closed();
+                                return;
+                            }
+                        };
+                        let _ = tokio::io::copy_bidirectional(&mut data, &mut local).await;
+                        st.stream_closed();
+                    });
+                    continue;
+                }
                 let target = tunnels.read().unwrap().get(&tunnel_id).cloned();
                 let Some(target) = target else {
                     tracing::warn!("收到未知隧道 {tunnel_id} 的开流请求，忽略");
@@ -257,8 +315,9 @@ pub async fn run_agent_session_with_status(
                     if let Some(st) = &st {
                         st.stream_opened();
                     }
+                    let st2 = st.clone();
                     handle_stream(stream_id, da, target, conn_id, st).await;
-                    if let Some(st) = &st {
+                    if let Some(st) = &st2 {
                         st.stream_closed();
                     }
                 });

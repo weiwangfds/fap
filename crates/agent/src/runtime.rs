@@ -55,10 +55,14 @@ impl RuntimeStatus {
         q.pop_front()
     }
 
+    /// M5c-2：标记已建立 N 条预热连接（仅审计/日志使用，避免并发污染）。
+    pub fn pool_mark_connected(&self, count: u32) {
+        tracing::info!("RuntimeStatus.pool_mark_connected({count})");
+    }
+
     pub fn pool_len(&self) -> usize {
         self.data_pool.lock().unwrap().len()
     }
-}
 
     pub fn set_registered(&self, v: bool) {
         self.registered.store(v, Ordering::Relaxed);

@@ -59,8 +59,9 @@ fn sample_messages() -> Vec<Message> {
         Message::OpenStream {
             stream_id: 42,
             tunnel_id: "web".into(),
+            conn_id: 0,
         },
-        Message::StreamConn { stream_id: 42 },
+        Message::StreamConn { stream_id: 42, conn_id: 0 },
         Message::ConfigPush {
             revision: 3,
             tunnels: vec![],
