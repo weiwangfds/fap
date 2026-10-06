@@ -19,7 +19,12 @@ fap 的目标是「frp 的数据面 + 向日葵式的托管体验」：
 - [x] **M5a** 审计日志 + ACL（`allowed_ips` CIDR）+ fail2ban 式节流
 - [x] **M5b** admin 签名会话令牌（`POST /api/auth/login` 换短期会话，主令牌不落浏览器）
 - [x] **M6** Next.js + Tailwind v4 + shadcn 控制台（静态导出，登录/设备/隧道编辑/指标/审计）
-- [ ] **M5c** yamux 多路复用（StreamConn 首帧声明流 ID 的设计已是复用前置，接入点见 `DESIGN.md`）/ 数据连接池预热 / 直连打洞
+- [x] **M5c-1** 数据连接池预热（协议扩展 OpenStream/StreamConn `conn_id`）
+- [x] **M5c-2** agent 预连接池（RuntimeStatus.data_pool + 注册后建 4 条预热 data 连接）
+- [x] **M5c-3** 传输层抽象（`Transport` trait + `Plain` + `Yamux`/`Punch` 预留接入点）
+- [ ] **M5c-2 端到端**：gateway 主动 `OpenStream{conn_id>0}` prefetch 协议（`PoolReady`）+ 配对入池（已设计，下会话实施）
+- [ ] **M5c-3 真接**：数据连接套上 yamux session
+- [ ] **M5c-4** 直连打洞（STUN-like NAT 探测 + UDP 打洞 + 中继 fallback）
 
 ## 快速上手（单二进制体验，向日葵式）
 
