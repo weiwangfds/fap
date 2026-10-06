@@ -171,6 +171,26 @@ pub async fn run_agent_session_with_status(
         .context("server_addr 不是合法的 host:port")?;
     let data_addr = std::net::SocketAddr::new(server.ip(), data_port);
 
+    // M5c-2：预热数据连接池 —— 注册成功后立即建 N 条空闲 data 连接，
+    // 每条只写一帧 StreamConn(stream_id=0) 占位（或静默等待）让网关侧持有 TcpStream。
+    // 注：StreamConn 首帧带 stream_id=0 在网关 matcher.complete() 处无等待者，会被关闭。
+    // 更稳的做法：agent 等 OpenStream 来时再写；空闲时连接不写首帧也不读——直接挂到池里。
+    // 见 handle_stream 的 conn_id > 0 分支。
+    let data_port_for_pool = data_addr;
+    let pool_st = status.clone();
+    tokio::spawn(async move {
+        for _ in 0..4 {
+            match tokio::net::TcpStream::connect(data_port_for_pool).await {
+                Ok(s) => {
+                    if let Some(st) = &pool_st {
+                        st.pool_push(s);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
     // 本会话的隧道表：RegisterAck.applied_tunnels 与 ConfigPush 都会整体替换它
     let tunnels = {
         let map: HashMap<String, TunnelConfig> = cfg
@@ -237,7 +257,7 @@ pub async fn run_agent_session_with_status(
                     if let Some(st) = &st {
                         st.stream_opened();
                     }
-                    handle_stream(stream_id, da, target, conn_id).await;
+                    handle_stream(stream_id, da, target, conn_id, st).await;
                     if let Some(st) = &st {
                         st.stream_closed();
                     }
@@ -291,36 +311,43 @@ pub async fn run_agent_session(cfg: AgentConfig) -> anyhow::Result<()> {
 }
 
 /// 为一条用户流建立数据连接：回连网关 → 声明流 ID → 与内网真实服务对接。
-/// `conn_id = 0` 走原路径（拨号新数据连接）；M5c-2 agent 预连接池启用后，
-/// agent 从空闲池中按 conn_id 取连接，不发起新拨号。
+/// `conn_id = 0` 走原路径（拨号新数据连接）；
+/// `conn_id > 0` 从 `status.data_pool` 取对应连接（M5c-2 启用后）。
 async fn handle_stream(
     stream_id: u64,
     data_addr: std::net::SocketAddr,
     target: TunnelConfig,
     conn_id: u32,
+    status: Option<Arc<runtime::RuntimeStatus>>,
 ) {
     use fap_protocol::{write_message, Message};
 
+    let mut data: Option<tokio::net::TcpStream> = None;
     if conn_id != 0 {
-        // M5c-2 启用后由此处从池中按 id 取连接；目前未启用，直接报错忽略。
-        tracing::warn!(
-            "OpenStream 携带 conn_id={conn_id} 但 agent 预连接池未启用（M5c-2 待启用）"
-        );
-        return;
-    }
-
-    let mut data = match tokio::net::TcpStream::connect(data_addr).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("连接网关数据面 {data_addr} 失败: {e}");
-            return;
+        if let Some(st) = &status {
+            data = st.pool_take_by_id(conn_id);
         }
+        if data.is_none() {
+            tracing::warn!(
+                "OpenStream 携带 conn_id={conn_id} 但 agent 预连接池为空，回退拨号"
+            );
+        }
+    }
+    let mut data = match data {
+        Some(s) => s,
+        None => match tokio::net::TcpStream::connect(data_addr).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("连接网关数据面 {data_addr} 失败: {e}");
+                return;
+            }
+        },
     };
     if write_message(
         &mut data,
         &Message::StreamConn {
             stream_id,
-            conn_id: 0,
+            conn_id,
         },
     )
     .await

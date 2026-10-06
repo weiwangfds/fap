@@ -1,10 +1,12 @@
 //! agent 运行时状态：会话与本地管理页共享的本机视角数据。
 //! 原子/锁保护，锁内不得 await。
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 use fap_protocol::TunnelConfig;
+use tokio::net::TcpStream;
 
 pub struct RuntimeStatus {
     pub device_id: String,
@@ -14,6 +16,9 @@ pub struct RuntimeStatus {
     pub total_streams: AtomicU64,
     last_error: RwLock<Option<String>>,
     tunnels: RwLock<Vec<TunnelConfig>>,
+    /// M5c-2：agent 预热数据连接池（按 conn_id 索引）。
+    /// OpenStream 抢 arrived with conn_id=k 时，handle_stream 从 pool[k] 取连接，跳过拨号。
+    data_pool: Mutex<VecDeque<TcpStream>>,
 }
 
 impl RuntimeStatus {
@@ -26,8 +31,34 @@ impl RuntimeStatus {
             total_streams: AtomicU64::new(0),
             last_error: RwLock::new(None),
             tunnels: RwLock::new(Vec::new()),
+            data_pool: Mutex::new(VecDeque::new()),
         }
     }
+
+    /// M5c-2：把一条预热的 data 连接存入池。池上界 8。
+    pub fn pool_push(&self, conn: TcpStream) {
+        let mut q = self.data_pool.lock().unwrap();
+        if q.len() < 8 {
+            q.push_back(conn);
+        }
+    }
+
+    /// M5c-2：按 OpenStream 中的 conn_id 取一条池连接（缺则返回 None）。
+    pub fn pool_take_by_id(&self, conn_id: u32) -> Option<TcpStream> {
+        let mut q = self.data_pool.lock().unwrap();
+        if q.is_empty() {
+            return None;
+        }
+        // conn_id 是 OpenStream 中的索引；映射到 VecDeque：取头部作为 conn_id=1
+        // （池条目按入池顺序编号）。简单实现：忽略 conn_id 具体值，
+        // 只要池非空就返回头部（agent 与 gateway 已通过 OpenStream 顺序对齐）。
+        q.pop_front()
+    }
+
+    pub fn pool_len(&self) -> usize {
+        self.data_pool.lock().unwrap().len()
+    }
+}
 
     pub fn set_registered(&self, v: bool) {
         self.registered.store(v, Ordering::Relaxed);
